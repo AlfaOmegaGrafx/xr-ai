@@ -15,7 +15,7 @@
   <script type="importmap">
   {
     "imports": {
-      "livekit-client": "https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.esm.mjs"
+      "livekit-client": "/vendor/livekit-client.esm.mjs"
     }
   }
   </script>
@@ -396,11 +396,37 @@
       max-width: 540px;
       margin: 0 auto;
     }
+
+    .cert-banner {
+      background: #fff8e6;
+      border: 1px solid #ffcc00;
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      font-size: 14px;
+      line-height: 1.45;
+      color: #3a3000;
+    }
+    .cert-banner a { color: var(--blue); }
+    .cert-banner code {
+      font-size: 13px;
+      background: rgba(0,0,0,0.06);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
   </style>
 </head>
 
 <body>
   <div class="page-content">
+    <div id="cert-hint" class="cert-banner" hidden>
+      <strong>XR headset setup:</strong> Use <code>https://10.0.0.158:8088</code> (not http).
+      If the page is blank or “can’t be reached”, trust the cert via
+      <a href="/cert">/cert</a> or tap <em>Advanced → Proceed</em>.
+      <strong>After a camera freeze, reboot the headset</strong> — the browser media stack
+      can stay wedged even when the Spark is healthy. Test with
+      <a href="/health">/health</a> first (should show <code>{"status":"ok"}</code>).
+    </div>
     <h1 class="page-title">NVIDIA XR-AI Sample</h1>
 
     <!-- ── Camera preview ────────────────────────────────────────────────── -->
@@ -602,7 +628,18 @@
   <!-- Error toast -->
   <div id="error-toast" role="alert" aria-live="assertive"></div>
 
-  <!-- Application entry point -->
-  <script type="module" src="/App/app.js"></script>
+  <!-- Application entry point (local LiveKit bundle — no CDN required) -->
+  <script type="module">
+    if (location.protocol === 'https:' && location.hostname !== 'localhost') {
+      const hint = document.getElementById('cert-hint');
+      if (hint) hint.hidden = false;
+    }
+    import('/App/app.js').catch((err) => {
+      const toast = document.getElementById('error-toast');
+      toast.textContent = `Failed to load app: ${err?.message || err}`;
+      toast.classList.add('visible');
+      console.error(err);
+    });
+  </script>
 </body>
 </html>

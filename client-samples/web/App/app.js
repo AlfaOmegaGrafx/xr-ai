@@ -18,6 +18,7 @@ import {
   $,
   createBaseModel, renderBase,
   enumerateCameras  as _enumerateCameras,
+  isXrHeadsetBrowser,
   connect           as _connect,
   disconnect        as _disconnect,
   startAudio        as _startAudio,
@@ -119,7 +120,8 @@ async function stopCamera() {
 
 async function startCamera() {
   await _startCamera(model, { render, showError, enumerateCameras });
-  if (model.isCameraActive) {
+  // A second getUserMedia for local preview wedges Quest/Galaxy XR mediaDevices.
+  if (model.isCameraActive && !isXrHeadsetBrowser()) {
     try {
       releasePreviewStream();
       // No facingMode default — let the browser pick the same camera LiveKit

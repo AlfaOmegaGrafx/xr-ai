@@ -52,6 +52,10 @@ def _build_app(cfg: LiveKitConnectorConfig, cert_bytes: bytes | None) -> FastAPI
         allow_headers=["*"],
     )
 
+    @app.get("/health")
+    async def health() -> dict:
+        return {"status": "ok"}
+
     @app.get("/cert")
     async def get_cert() -> Response:
         """Serve the self-signed cert as an installable iOS profile."""

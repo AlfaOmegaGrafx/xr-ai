@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# 3daigc-vlm-example worker — voice VLM + 3DAIGC mesh generation via HTTP MCP.
+
+model_backend: nim
+models_yaml: models.yaml
+voice_gate_yaml: voice_gate.yaml
+
+default_prompt: "Describe what you see."
+
+# 3DAIGC HTTP MCP (must be running before the worker starts).
+daigc_mcp_url: http://localhost:8260
+# Optional model preference for image_to_textured_mesh (e.g. trellis2). Omit for API default.
+# daigc_mesh_model: trellis2
+daigc_job_timeout_sec: 600
+
+system_prompt: |
+  You are an XR assistant with live camera vision and access to 3DAIGC mesh
+  generation on this machine. Decide per question:
+
+  - For visible-scene questions ("what am I looking at", "describe this",
+    "what color is…"), answer from the camera image.
+  - When the user asks to make, create, generate, or model a 3D mesh or
+    model from what they see, the system runs 3DAIGC automatically — you
+    do not need to explain tool JSON; just acknowledge briefly if asked
+    while generation is in progress.
+  - For general knowledge unrelated to the scene, answer normally without
+    using the image.
+
+  Style:
+  - Plain conversational English — no JSON, code, or markdown.
+  - Keep replies to 10-15 words unless the user asks for detail.
+  - If the user says stop or be quiet, acknowledge briefly and stop.
+
+frame_max_age_s:      5.0
+camera_on_timeout_s: 30.0
+camera_grace_s:       5.0
+
+silero_threshold:  0.5
+silence_duration:  0.4
+min_speech:        0.1
+
+idle_timeout_secs: 0

@@ -43,9 +43,21 @@ export function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-/** @returns {boolean} */
+/** @returns {boolean} True on Quest, Galaxy XR, and other Android XR browsers. */
+export function isXrHeadsetBrowser() {
+  const ua = navigator.userAgent || '';
+  if (/OculusBrowser/i.test(ua)) return true;
+  if (/Android/i.test(ua) && /XR|Xr|HMD|VR|Oculus|Quest|Galaxy/i.test(ua)) return true;
+  // Galaxy XR immersive browser often reports as Samsung Android Chrome + WebXR.
+  if (/Android/i.test(ua) && /Samsung/i.test(ua) && typeof navigator.xr !== 'undefined') {
+    return true;
+  }
+  return false;
+}
+
+/** @deprecated Use {@link isXrHeadsetBrowser}. */
 export function isQuestBrowser() {
-  return /OculusBrowser/.test(navigator.userAgent || '');
+  return isXrHeadsetBrowser();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,6 +69,25 @@ export function isQuestBrowser() {
 // name — strip the trailing hex identifier so the picker reads cleanly.
 function stripCameraId(label) {
   return (label || '').replace(/\s*\([0-9a-fA-F]{4}:[0-9a-fA-F]{4}\)\s*$/, '').trim();
+}
+
+/**
+ * Cameras that must not be opened on XR headsets — doing so can wedge the
+ * browser media stack until the headset reboots (Quest and Galaxy XR).
+ * @param {string} label
+ * @returns {boolean}
+ */
+function isXrUnsafeCamera(label) {
+  const l = (label || '').toLowerCase();
+  if (/\b(passthrough|see.?through|mixed.?reality|\bmr\b)\b/i.test(l)) return false;
+  return /\b(front|tracking|depth|infrared|\bir\b|world|outward|external|rear|back|rgb)\b/i.test(l);
+}
+
+/** @param {MediaDeviceInfo[]} cameras */
+function filterXrCameras(cameras) {
+  const safe = cameras.filter(d => !isXrUnsafeCamera(d.label));
+  // Never expose outward / tracking cameras; fall back to the first device only.
+  return safe.length > 0 ? safe : cameras.slice(0, 1);
 }
 
 /**
@@ -73,18 +104,20 @@ export async function enumerateCameras(model, render) {
     let cameras = devices.filter(d => d.kind === 'videoinput');
 
     if (cameras.length > 0 && !cameras.some(d => d.deviceId)) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        stream.getTracks().forEach(t => t.stop());
-        devices  = await navigator.mediaDevices.enumerateDevices();
-        cameras  = devices.filter(d => d.kind === 'videoinput');
-      } catch { /* permission denied — proceed with anonymous devices */ }
+      // On XR headsets, probing with getUserMedia({video:true}) can open the
+      // wrong sensor and wedge mediaDevices until reboot — defer to Start Camera.
+      if (!isXrHeadsetBrowser()) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          stream.getTracks().forEach(t => t.stop());
+          devices  = await navigator.mediaDevices.enumerateDevices();
+          cameras  = devices.filter(d => d.kind === 'videoinput');
+        } catch { /* permission denied — proceed with anonymous devices */ }
+      }
     }
 
-    // Accessing a non-passthrough camera on Quest breaks the mediaDevices stack
-    // until headset reboot, so this filters the camera picker to passthrough only.
-    if (isQuestBrowser()) {
-      cameras = cameras.filter(d => !/\bfront\b/i.test(d.label));
+    if (isXrHeadsetBrowser()) {
+      cameras = filterXrCameras(cameras);
     }
 
     const list = cameras.map((d, i) => ({
@@ -259,8 +292,14 @@ export function renderBase(model) {
         .map(c => `<option value="${escapeHtml(c.deviceId)}">${escapeHtml(c.label)}</option>`)
         .join('');
     }
-    camSelect.value    = model.selectedCameraId ?? '';
+    camSelect.value = model.selectedCameraId ?? '';
+    const onXr = isXrHeadsetBrowser();
     camSelect.disabled = model.isCameraActive;
+    camSelect.title = model.isCameraActive
+      ? 'Stop the camera before switching devices'
+      : onXr
+        ? 'Passthrough camera only on XR headsets'
+        : 'Select a camera before starting';
   } else {
     selectRow.style.display = 'none';
   }
@@ -409,6 +448,10 @@ export async function connect(model, {
     render();
   };
 
+  // Fresh identity per connect avoids LiveKit DUPLICATE_IDENTITY when reloading
+  // or opening a second tab before the prior session fully tears down.
+  model.identity = `web-client-${crypto.randomUUID().slice(0, 8)}`;
+
   model.session = newSession;
 
   const sessionConfig = new SessionConfig({
@@ -542,7 +585,10 @@ export async function sendCustom(model, text, showError) {
  * }} actions
  */
 export function wireBaseEvents(model, actions) {
-  const { connect, disconnect, startAudio, stopAudio, startCamera, stopCamera, sendPing, sendCustom } = actions;
+  const {
+    connect, disconnect, startAudio, stopAudio, startCamera, stopCamera,
+    sendPing, sendCustom,
+  } = actions;
 
   $('host-input').addEventListener('input', (e) => { model.host = e.target.value; });
   $('port-input').addEventListener('input', (e) => { model.port = Number(e.target.value) || 8080; });
