@@ -6,13 +6,22 @@
 from __future__ import annotations
 
 import base64
+import io
+import time
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from nat.builder.workflow_builder import WorkflowBuilder
 from PIL import Image
-from xr_ai_nat.functions.vision import VisionFunctionsConfig
-from xr_ai_nat.functions.vision._images import load_jpeg_data_url
+from pydantic import ValidationError
+from xr_ai_agent import FrameData, FrameSignal, FrameUnavailable, PixelFormat
+from xr_ai_nat.functions.vision import (
+    StreamingVisionConfig,
+    VisionFunctionsConfig,
+    VisionRequest,
+)
+from xr_ai_nat.functions.vision._images import frame_jpeg_data_url, load_jpeg_data_url
 
 
 class _Vlm:
@@ -23,6 +32,38 @@ class _Vlm:
     async def ask_image(self, image: str, question: str, *, system_prompt: str = ""):
         self.calls.append((image, question, system_prompt))
         return SimpleNamespace(content=self.content)
+
+    async def stream(self, image: str, question: str, *, system_prompt: str = ""):
+        self.calls.append((image, question, system_prompt))
+        for token in ("a ", "blue ", "square"):
+            yield token
+
+
+class _Endpoint:
+    def __init__(self) -> None:
+        self.frame_callback = None
+        self.statuses: list[tuple[str, str]] = []
+
+    def on_frame(self, callback) -> None:
+        self.frame_callback = callback
+
+    def on_participant(self, _callback) -> None:
+        pass
+
+    async def request_frame(self, signal: FrameSignal) -> FrameData:
+        return FrameData(
+            seq=signal.seq,
+            pts_us=signal.pts_us,
+            width=2,
+            height=2,
+            fmt=PixelFormat.RGB24,
+            data=bytes([20, 40, 60] * 4),
+            participant_id=signal.participant_id,
+            track_id=signal.track_id,
+        )
+
+    async def set_status(self, status: str, participant_id: str) -> None:
+        self.statuses.append((status, participant_id))
 
 
 class _HttpErrorVlm(_Vlm):
@@ -38,6 +79,35 @@ def test_load_jpeg_data_url_emits_data_url(tmp_path) -> None:
 
     assert image_url.startswith("data:image/jpeg;base64,")
     assert base64.b64decode(image_url.split(",", 1)[1]).startswith(b"\xff\xd8")
+
+
+@pytest.mark.parametrize(
+    ("pixel_format", "data"),
+    [
+        (PixelFormat.RGBA, bytes([20, 40, 60, 255] * 4)),
+        (PixelFormat.BGRA, bytes([60, 40, 20, 255] * 4)),
+        (PixelFormat.I420, bytes([80] * 4 + [128, 128])),
+        (PixelFormat.NV12, bytes([80] * 4 + [128, 128])),
+    ],
+)
+def test_frame_jpeg_data_url_supports_non_rgb_frame_formats(pixel_format, data) -> None:
+    frame = FrameData(
+        seq=1,
+        pts_us=0,
+        width=2,
+        height=2,
+        fmt=pixel_format,
+        data=data,
+        participant_id="alice",
+        track_id="camera",
+    )
+
+    image_url = frame_jpeg_data_url(frame)
+    image = Image.open(io.BytesIO(base64.b64decode(image_url.split(",", 1)[1])))
+
+    assert image_url.startswith("data:image/jpeg;base64,")
+    assert image.mode == "RGB"
+    assert image.size == (2, 2)
 
 
 async def test_vision_function_normalizes_image_and_returns_clean_answer(tmp_path) -> None:
@@ -111,3 +181,78 @@ async def test_vision_function_reports_http_error(tmp_path) -> None:
         )
 
     assert answer == "ask_image: vlm-server request failed: backend unavailable"
+
+
+async def test_streaming_vision_function_uses_current_participant_frame() -> None:
+    endpoint = _Endpoint()
+    vlm = _Vlm("a blue square")
+    config = StreamingVisionConfig(
+        endpoint=endpoint,
+        vlm=vlm,
+        system_prompt="Answer briefly.",
+    )
+
+    async with WorkflowBuilder() as builder:
+        function = await builder.add_function("perception", config)
+        assert endpoint.frame_callback is not None
+        await endpoint.frame_callback(
+            FrameSignal(
+                slot=0,
+                seq=1,
+                pts_us=time.time_ns() // 1_000,
+                width=2,
+                height=2,
+                fmt=PixelFormat.RGB24,
+                data_sz=12,
+                participant_id="alice",
+                track_id="camera",
+            )
+        )
+        chunks = [
+            chunk.text
+            async for chunk in function.astream(VisionRequest(participant_id="alice", query="What is shown?"))
+        ]
+        answer = await function.ainvoke(
+            VisionRequest(participant_id="alice", query="What is shown?")
+        )
+
+    assert chunks == ["a ", "blue ", "square"]
+    assert answer.text == "a blue square"
+    assert endpoint.statuses == [
+        ("processing", "alice"),
+        ("idle", "alice"),
+        ("processing", "alice"),
+        ("idle", "alice"),
+    ]
+    assert vlm.calls[0][1:] == ("What is shown?", "Answer briefly.")
+    assert vlm.calls[0][0].startswith("data:image/jpeg;base64,")
+
+
+async def test_streaming_vision_function_reports_unavailable_frame(monkeypatch) -> None:
+    endpoint = _Endpoint()
+    vlm = _Vlm("unused")
+
+    async def unavailable_frame(*_args) -> str:
+        raise FrameUnavailable("No camera frame available — please try again.")
+
+    monkeypatch.setattr("xr_ai_nat.functions.vision.functions._current_image", unavailable_frame)
+
+    async with WorkflowBuilder() as builder:
+        function = await builder.add_function("perception", StreamingVisionConfig(endpoint=endpoint, vlm=vlm))
+        chunks = [
+            chunk.text
+            async for chunk in function.astream(VisionRequest(participant_id="alice", query="What is shown?"))
+        ]
+
+    assert chunks == ["No camera frame available — please try again."]
+    assert endpoint.statuses == []
+    assert vlm.calls == []
+
+
+def test_streaming_vision_request_rejects_unknown_arguments() -> None:
+    with pytest.raises(ValidationError):
+        VisionRequest(
+            participant_id="alice",
+            query="What is shown?",
+            unsupported=True,
+        )
