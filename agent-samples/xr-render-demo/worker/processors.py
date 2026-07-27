@@ -189,10 +189,8 @@ class RenderSceneProcessor(BrainProcessor):
         _prompts = prompt_path.parent
         self._quick_ack_path = _prompts / "quick_ack.txt"
         self._still_work_path = _prompts / "still_working.txt"
-        self._validate_path = _prompts / "validate.txt"
         self._quick_ack_cache = self._quick_ack_path.read_text(encoding="utf-8").strip()
         self._still_work_cache = self._still_work_path.read_text(encoding="utf-8").strip()
-        self._validate_cache = self._validate_path.read_text(encoding="utf-8").strip()
         self._tools = tools
         self._llm = llm
         self._agent_llm = agent_llm
@@ -566,35 +564,6 @@ class RenderSceneProcessor(BrainProcessor):
                 await self._send(pid, msg, topic=_AGENT_PROGRESS_TOPIC)
                 sent.append(msg)
             await asyncio.sleep(repeat_every)
-
-    async def _validate(self, transcript: str, post_scene: dict) -> tuple[bool, str]:
-        """Ask Minitron whether the task was completed as requested.
-
-        Returns (ok, issue). Defaults to ok=True on any failure so a broken
-        validator never blocks the response.
-        """
-        messages = [
-            ChatMessage(role="system", content=self._read_prompt(self._validate_path, "_validate_cache")),
-            ChatMessage(role="user", content=(f"Request: {transcript}\nCurrent scene: {json.dumps(post_scene or {})}")),
-        ]
-        try:
-            resp = await asyncio.wait_for(
-                self._llm.chat(messages, max_tokens=60, temperature=0.0),
-                timeout=8.0,
-            )
-            raw = resp.content.strip()
-            obj_text = extract_json(raw)
-            if obj_text:
-                obj = json.loads(obj_text)
-                ok = bool(obj.get("ok", True))
-                issue = str(obj.get("issue", ""))
-                logger.debug("validation: ok={}  issue={!r}", ok, issue)
-                return ok, issue
-        except Exception:
-            logger.opt(exception=True).debug(
-                "validation call failed — defaulting to ok",
-            )
-        return True, ""
 
     async def _build_turn_context(self, pid: str, *, ref_us: int = 0) -> str:
         """Pre-fetch scene/pose and format the turn-context block.

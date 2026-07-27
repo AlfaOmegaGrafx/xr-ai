@@ -109,6 +109,7 @@ xr-ai-models  (agent-sdk/xr-ai-models/)
 xr-ai-nat  (agent-sdk/xr-ai-nat/)
     └── nvidia-nat-core ==1.8.0
     └── pydantic >=2.10
+    └── [agents] nvidia-nat-langchain ==1.8.0, xr-ai-models [editable: ../xr-ai-models]
     └── [mcp] fastmcp >=3.4,<4
     └── [services] msgpack >=1.0, pyzmq >=27.0
     └── [vision] httpx >=0.27, numpy >=1.24, Pillow >=10.0, xr-ai-agent [editable: ..], xr-ai-models [editable: ../xr-ai-models]
@@ -127,7 +128,9 @@ xr-ai-nat  (agent-sdk/xr-ai-nat/)
     the typed OpenXR service and returns a complete user coordinate frame.
     ``xr_video_memory`` calls the typed video-memory service for recorded-video
     discovery, queries, and frame extraction. Live frames stay with the hub
-    client owned by their caller.
+    client owned by their caller. The ``agents`` extra registers
+    ``ModelsLLMConfig`` so NAT's built-in LangChain-backed agents delegate
+    model I/O to an ``xr-ai-models`` LLMService.
 
 xr-openxr-service  (services/openxr-service/)
     └── xr-ai-launcher [editable: ../../utils/xr-ai-launcher]

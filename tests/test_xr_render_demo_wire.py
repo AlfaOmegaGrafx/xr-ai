@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Wire-trace golden tests for the xr-render-demo worker LLM call sites.
+"""Wire-trace golden tests for the xr-render-demo model-service contracts.
 
-Exercises the four LLM call sites in ``RenderSceneProcessor`` against
-``StubOpenAI`` without a real server or GPU.  Asserts that the JSON bodies
-sent over the wire match pre-migration goldens (byte-for-byte field presence,
-not ordering) and that ``ChatResponse`` fields are correctly extracted.
+Exercises the worker's direct model calls against ``StubOpenAI`` without a
+real server or GPU. Asserts that the JSON bodies sent over the wire retain the
+required fields and that ``ChatResponse`` fields are correctly extracted.
 
 GPU verification skipped — stub-server tests only.
 """
@@ -165,32 +164,6 @@ async def test_still_working_wire_golden() -> None:
     assert "chat_template_kwargs" not in body
 
     assert resp.content == "Still calculating the position..."
-
-
-# ── validation wire golden ────────────────────────────────────────────────────
-
-
-async def test_validation_wire_golden() -> None:
-    """validation: max_tokens=60, temperature=0.0, no tools, no thinking."""
-    stub = StubOpenAI()
-    stub.set_chat_message(content='{"ok": true, "issue": ""}')
-    llm = _make_llm(stub)
-
-    messages = [
-        ChatMessage(role="system", content="Validate whether the request was completed."),
-        ChatMessage(role="user",   content='Request: Add red sphere\nCurrent scene: {}'),
-    ]
-    resp = await llm.chat(messages, max_tokens=60, temperature=0.0)
-
-    body = stub.last_json()
-
-    assert body["model"]       == "llm"
-    assert body["max_tokens"]  == 60
-    assert body["temperature"] == 0.0
-    assert "tools" not in body
-    assert "chat_template_kwargs" not in body
-
-    assert resp.content == '{"ok": true, "issue": ""}'
 
 
 # ── agentic-loop wire golden ──────────────────────────────────────────────────
