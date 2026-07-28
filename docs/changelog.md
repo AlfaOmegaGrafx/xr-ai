@@ -9,6 +9,18 @@ Significant decisions, in reverse-chronological order. Update this whenever a
 non-trivial architectural or design decision is made so the rationale is
 preserved and not re-litigated.
 
+### 2026-07-27 — MCP export lives under `xr_ai_nat.mcp`
+
+The generic native-function → MCP publisher moved from
+`xr_ai_nat.adapters.mcp` to a top-level `xr_ai_nat.mcp` package. The canonical
+import is now `xr_ai_nat.mcp.create_mcp_server`; `mcp/` owns exposing native
+capabilities to MCP-only agents, leaving `adapters/` for framework adapters.
+Public signature is unchanged; only the import path moved. Since
+`xr_ai_nat.adapters.mcp.create_mcp_server` was a documented public import, it
+remains as a deprecated forwarding alias (it emits a `DeprecationWarning` on
+import) to avoid a silent breaking change; the alias will be removed in a
+future version.
+
 ### 2026-07-27 — Shared service transport and value models under `xr-ai-nat`
 
 The private correlated msgpack/ZMQ transport shared by service-backed functions
