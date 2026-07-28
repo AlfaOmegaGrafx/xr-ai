@@ -9,6 +9,29 @@ Significant decisions, in reverse-chronological order. Update this whenever a
 non-trivial architectural or design decision is made so the rationale is
 preserved and not re-litigated.
 
+### 2026-07-27 — Shared service transport and value models under `xr-ai-nat`
+
+The private correlated msgpack/ZMQ transport shared by service-backed functions
+moved from `xr_ai_nat.functions._rpc` (a four-module package) to a single
+`xr_ai_nat.functions._service.rpc` module; `_service/` owns the private RPC
+transport. The shared value models live separately in a capability-neutral
+`xr_ai_nat.functions.types`: the coordinate models `Vector3` and `SpatialFrame`
+moved there out of `spatial_math/schemas.py`, drawn from a shared, exported
+`ServiceResult` base. `spatial_math/schemas.py` is retained as a deprecated
+re-export alias (with a `DeprecationWarning`) so existing `spatial_math.schemas`
+imports keep working; it will be removed in a future version. `Color` is added
+to `functions.types` too as a preparatory shared home; the render scene still
+defines and uses its own `Color`/`Vector3`, so migrating that scene schema onto
+these types is deferred to a later change.
+
+The RPC wire format and the models' JSON string rendering (`__str__` →
+`model_dump_json`) are identical. One deliberate semantic change: the shared
+`ServiceResult` base sets `extra="allow"`, so unknown fields are now retained
+rather than dropped (the previous coordinate base used Pydantic's default
+`extra="ignore"`). This matches the target's intent and only affects inputs
+that carry fields outside the model — the spatial-math/tracking call sites pass
+exactly the declared fields, so their behaviour is unchanged.
+
 ### 2026-07-21 — Video memory is recorded history, not live capture
 
 `video-memory-service` reads the H.264 chunks written by XR Media Hub and no
