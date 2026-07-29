@@ -16,7 +16,8 @@ import json
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from types import SimpleNamespace
+
+import pytest
 
 # Add the worker directory to sys.path so we can import its modules.
 _WORKER_DIR = (
@@ -41,7 +42,9 @@ from xr_ai_models import (
 )
 from xr_ai_models.config import load_models_config
 from nat.builder.workflow_builder import WorkflowBuilder
-from xr_ai_nat.functions.vision import StreamingVisionConfig
+from nat.plugin_api import FunctionGroupRef
+from xr_ai_nat.functions.video_memory import VideoMemoryFunctionsConfig
+from xr_ai_nat.functions.vision import VisionToolsConfig
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -409,11 +412,6 @@ class _UnusedToolbox:
         raise AssertionError(f"unexpected native tool invocation: {name} {arguments}")
 
 
-class _UnusedVision:
-    async def ainvoke(self, request):
-        raise AssertionError(f"unexpected live-vision invocation: {request}")
-
-
 def _make_brain(transport: _CaptureTransport):
     """Build a real RenderSceneProcessor whose service clients are unused.
 
@@ -425,7 +423,6 @@ def _make_brain(transport: _CaptureTransport):
         transport   = transport,
         cfg         = None,
         toolbox     = _UnusedToolbox(),
-        live_vision = _UnusedVision(),
         release_vision = lambda _pid: None,
         text_memory = None,
         prompt_path = _SYSTEM_PROMPT,
@@ -600,11 +597,12 @@ async def test_render_spatial_native_toolbox_builds() -> None:
 async def test_live_worker_and_eval_share_native_toolbox_assembly() -> None:
     """The shared builder exposes the complete runtime tool surface without MCP discovery."""
     async with WorkflowBuilder() as builder:
-        toolbox = await _caps.build_native_toolbox(
+        toolbox, _vision_config = await _caps.build_native_toolbox(
             builder,
             scene_endpoint="tcp://127.0.0.1:65527",
             openxr_endpoint="tcp://127.0.0.1:65528",
             video_memory_endpoint="tcp://127.0.0.1:65529",
+            frame_endpoint=_FakeEndpoint(),
             vlm=_FakeVLM(),
         )
         names = {tool.name for tool in toolbox.definitions()}
@@ -612,7 +610,6 @@ async def test_live_worker_and_eval_share_native_toolbox_assembly() -> None:
     assert names == {
         "add_primitive",
         "along_direction",
-        "ask_image",
         "between_anchors",
         "displace_object",
         "displace_objects",
@@ -622,6 +619,8 @@ async def test_live_worker_and_eval_share_native_toolbox_assembly() -> None:
         "get_scene_state",
         "get_video_stats",
         "list_recorded_participants",
+        "look_at_current_frame",
+        "look_at_past_frame",
         "place_inside_by_id",
         "place_object_relative",
         "place_user_relative",
@@ -634,6 +633,49 @@ async def test_live_worker_and_eval_share_native_toolbox_assembly() -> None:
         "update_primitive",
         "world_offset",
     }
+
+
+async def test_model_facing_perception_schema_is_trimmed() -> None:
+    """The perception tools reach the model with participant/reference context
+    stripped. The worker injects ``participant_id`` (and ``reference_time_us``
+    for recorded lookups); exposing them verbatim would tell the model to fill a
+    required ``participant_id`` it cannot know and whose value is discarded.
+    Guards the do-not-reverse of main's trimmed ``{question}`` contract."""
+    from xr_render_demo_worker import _WORKER_MANAGED_TOOLS
+
+    async with WorkflowBuilder() as builder:
+        toolbox, _vision_config = await _caps.build_native_toolbox(
+            builder,
+            scene_endpoint="tcp://127.0.0.1:65527",
+            openxr_endpoint="tcp://127.0.0.1:65528",
+            video_memory_endpoint="tcp://127.0.0.1:65529",
+            frame_endpoint=_FakeEndpoint(),
+            vlm=_FakeVLM(),
+        )
+        # The raw native request schemas DO expose the injected context — which is
+        # exactly why they must not reach the model verbatim.
+        native = {tool.name: tool for tool in toolbox.definitions()}
+        assert "participant_id" in native["look_at_current_frame"].parameters["properties"]
+        assert "participant_id" in native["look_at_past_frame"].parameters["properties"]
+
+        # Assemble the model-facing list exactly as the worker does.
+        tools = toolbox.definitions(
+            exclude=_WORKER_MANAGED_TOOLS
+            | {_proc._LIVE_PERCEPTION_TOOL, _proc._PAST_PERCEPTION_TOOL}
+        )
+        tools.extend(_proc._PERCEPTION_TOOL_DEFS)
+
+    model_facing = {tool.name: tool for tool in tools}
+    live = model_facing["look_at_current_frame"].parameters
+    past = model_facing["look_at_past_frame"].parameters
+    assert set(live["properties"]) == {"question"}
+    assert live["required"] == ["question"]
+    assert set(past["properties"]) == {"question", "second_ago"}
+    assert set(past["required"]) == {"question", "second_ago"}
+    # No injected context leaks to the model.
+    for schema in (live, past):
+        assert "participant_id" not in schema["properties"]
+        assert "reference_time_us" not in schema["properties"]
 
 
 class _FakeEndpoint:
@@ -718,24 +760,31 @@ def _now_us_test() -> int:
 
 @asynccontextmanager
 async def _perception_brain(transport, vlm: _FakeVLM):
-    config = StreamingVisionConfig(
+    config = VisionToolsConfig(
         endpoint=transport.endpoint,
         vlm=vlm,
-        system_prompt=_proc._PERCEPTION_SYSTEM_PROMPT,
+        video_memory=FunctionGroupRef("video_memory"),
         frame_max_age_s=60.0,
         frame_timeout_s=0.2,
     )
     async with WorkflowBuilder() as builder:
-        live_vision = await builder.add_function("live_vision_test", config)
+        # A resolvable (offline) video-memory group so the vision group builds;
+        # look_at_current_frame never touches it.
+        await builder.add_function_group(
+            "video_memory",
+            VideoMemoryFunctionsConfig(endpoint="tcp://127.0.0.1:65529"),
+        )
+        await builder.add_function_group("vision", config)
+        vision = await builder.get_function_group("vision")
+        toolbox = _caps.NativeToolbox(await vision.get_all_functions())
         yield _proc.RenderSceneProcessor(
             transport=transport,
             cfg=None,
-            toolbox=_UnusedToolbox(),
-            live_vision=live_vision,
+            toolbox=toolbox,
             release_vision=config.release,
             text_memory=None,
             prompt_path=_SYSTEM_PROMPT,
-            tools=[_proc._PERCEPTION_TOOL_DEF],
+            tools=[],
             llm=None,
             agent_llm=None,
         )
@@ -753,8 +802,8 @@ def test_perception_tool_def_in_prompt_and_classifier() -> None:
 
 
 async def test_perception_query_reaches_vlm_frame_path() -> None:
-    """A vision question routed to look_at_current_frame turns the camera on,
-    pulls the live frame, and runs the VLM — returning the VLM answer to the
+    """A vision question routed to look_at_current_frame pulls the current
+    always-on live frame and runs the VLM — returning the VLM answer to the
     loop (NOT a generic reasoning-loop fallback)."""
     transport = _CaptureTransportWithEndpoint()
     transport.set_target_participant("pid-1")
@@ -782,20 +831,115 @@ async def test_perception_query_reaches_vlm_frame_path() -> None:
     assert result == {"answer": "It's a red mug."}
 
 
-async def test_perception_uses_structured_vision_unavailability() -> None:
-    """Unavailable vision results take the graceful path regardless of text."""
+async def test_perception_unavailable_frame_ends_turn_gracefully() -> None:
+    """A failed live-vision invocation ends the turn via the graceful no-frame path.
+
+    The native ``look_at_current_frame`` raises (no frame / no VLM answer); the
+    processor converts any failure into a ``_PerceptionUnavailableError`` carrying
+    the short spoken message rather than feeding an error back to the model."""
     transport = _CaptureTransport()
+    brain = _make_brain(transport)  # _UnusedToolbox.invoke raises on call
+
+    with pytest.raises(_proc._PerceptionUnavailableError) as excinfo:
+        await brain._look_at_current_frame("pid-1", "What is shown?")  # noqa: SLF001
+
+    assert excinfo.value.spoken == _proc._NO_FRAME_MSG
+
+
+def _stub_turn(brain, loop) -> None:
+    """Stub the LLM-driven parts so _run_turn exercises only the status bracket."""
+    async def _ack(_text):
+        return "", False
+    brain._quick_ack = _ack        # noqa: SLF001
+    brain._agentic_loop = loop     # noqa: SLF001
+
+
+async def test_run_turn_brackets_client_status_processing_then_idle() -> None:
+    """The render turn owns the per-client UI status: 'processing' at entry and
+    'idle' when it ends. (Native vision functions never emit status.)"""
+    transport = _CaptureTransportWithEndpoint()
+    transport.set_target_participant("pid-1")
     brain = _make_brain(transport)
 
-    class _UnavailableVision:
-        async def ainvoke(self, _request):
-            return SimpleNamespace(text="The message may change.", status="unavailable")
+    async def _loop(_text, _pid, *, ref_us, needs_thinking, thinking_ctx):
+        return "All set."
 
-    brain._live_vision = _UnavailableVision()  # noqa: SLF001
+    _stub_turn(brain, _loop)
+    async for _ in brain._run_turn("pid-1", "add a red sphere"):  # noqa: SLF001
+        pass
 
-    result = await brain._look_at_current_frame("pid-1", "What is shown?")  # noqa: SLF001
+    assert transport.endpoint.statuses == [("processing", "pid-1"), ("idle", "pid-1")]
 
-    assert result == {"error": "The message may change.", "spoken": _proc._NO_FRAME_MSG}
+
+async def test_run_turn_status_clears_on_failure() -> None:
+    """'idle' still fires when the turn fails (finally path)."""
+    transport = _CaptureTransportWithEndpoint()
+    transport.set_target_participant("pid-1")
+    brain = _make_brain(transport)
+
+    async def _boom(_text, _pid, *, ref_us, needs_thinking, thinking_ctx):
+        raise RuntimeError("loop failed")
+
+    _stub_turn(brain, _boom)
+    async for _ in brain._run_turn("pid-1", "q"):  # noqa: SLF001
+        pass
+
+    assert transport.endpoint.statuses == [("processing", "pid-1"), ("idle", "pid-1")]
+
+
+async def test_run_turn_status_clears_on_barge_in_cancellation() -> None:
+    """A barge-in cancels the turn; 'idle' must still fire and the
+    CancelledError must propagate."""
+    transport = _CaptureTransportWithEndpoint()
+    transport.set_target_participant("pid-1")
+    brain = _make_brain(transport)
+
+    async def _cancel(_text, _pid, *, ref_us, needs_thinking, thinking_ctx):
+        raise asyncio.CancelledError
+
+    _stub_turn(brain, _cancel)
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in brain._run_turn("pid-1", "q"):  # noqa: SLF001
+            pass
+
+    assert transport.endpoint.statuses == [("processing", "pid-1"), ("idle", "pid-1")]
+
+
+async def test_run_turn_status_clears_when_cancelled_during_initial_publish() -> None:
+    """If a barge-in lands while the initial 'processing' publish is still in
+    flight, the turn must still clear to 'idle' — the publish sits inside the
+    protected region, so the finally always runs."""
+    transport = _CaptureTransportWithEndpoint()
+    transport.set_target_participant("pid-1")
+    brain = _make_brain(transport)
+
+    in_processing = asyncio.Event()
+    statuses = transport.endpoint.statuses
+
+    async def _blocking_status(status, pid=None):
+        statuses.append((status, pid or ""))
+        if status == "processing":
+            in_processing.set()
+            await asyncio.sleep(3600)  # hold the publish open until cancelled
+
+    transport.endpoint.set_status = _blocking_status  # type: ignore[assignment]
+
+    async def _loop(_text, _pid, *, ref_us, needs_thinking, thinking_ctx):
+        return "unreached"
+
+    _stub_turn(brain, _loop)
+
+    async def _run() -> None:
+        async for _ in brain._run_turn("pid-1", "q"):  # noqa: SLF001
+            pass
+
+    task = asyncio.create_task(_run())
+    await in_processing.wait()  # cancellation now lands mid-'processing'-publish
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ("idle", "pid-1") in statuses
 
 
 async def test_agentic_loop_reports_agent_llm_failure() -> None:

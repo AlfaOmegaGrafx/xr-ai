@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 import uuid
 from pathlib import Path
@@ -39,7 +38,6 @@ from nat.builder.function import Function
 from xr_ai_agent import DataMessage
 from xr_ai_logging import print_task_done_banner
 from xr_ai_models import ChatMessage, LLMService, ToolCall, ToolDef
-from xr_ai_nat.functions.vision import VisionRequest
 from xr_ai_pipecat import BrainProcessor
 from xr_ai_pipecat.transport import XRMediaHubTransport
 
@@ -61,45 +59,67 @@ _trace_log = logger.bind(trace=True)
 _MAX_LOOP = 10  # visual queries need up to 5 steps; give headroom
 
 
-# Brain-executed perception tool. The processor supplies the active participant
-# before invoking the native live-vision function.
-_PERCEPTION_TOOL = "look_at_current_frame"
+# Native perception tools (from the ``xr_vision_tools`` group) exposed to the
+# model. The processor supplies participant context (and the utterance time for
+# recorded lookups) that the model never provides.
+_LIVE_PERCEPTION_TOOL = "look_at_current_frame"
+_PAST_PERCEPTION_TOOL = "look_at_past_frame"
 
-_PERCEPTION_TOOL_DEF = ToolDef(
-    name=_PERCEPTION_TOOL,
+# Model-facing perception schemas. The native ``xr_vision_tools`` request models
+# also carry ``participant_id`` (and ``reference_time_us`` for recorded lookups),
+# which the processor injects — the model never supplies them. Presenting the raw
+# generated schema would tell the model to fill a required ``participant_id`` it
+# cannot know and whose value is discarded, so the model sees these trimmed
+# contracts instead (the worker swaps them in for the native ones).
+_LIVE_PERCEPTION_TOOL_DEF = ToolDef(
+    name=_LIVE_PERCEPTION_TOOL,
     description=(
-        "Look at the user's LIVE camera feed right now and answer a question "
-        "about the real world — what they are holding, pointing at, or looking "
-        "at; a real-world colour, shape, text, or object. Turns the camera on "
-        "automatically and inspects the current frame. Use this whenever the "
-        "answer cannot be known from the XR scene state alone."
+        "Inspect the user's present physical view when a request explicitly requires a visible fact. "
+        "Do not use this tool to interpret conversation or inspect the virtual XR scene."
     ),
     parameters={
         "type": "object",
         "properties": {
             "question": {
                 "type": "string",
-                "description": (
-                    "The specific question to answer about the live camera "
-                    "frame, e.g. 'What colour is the object the user is "
-                    "holding?'"
-                ),
+                "description": "Specific question about the live camera frame.",
             },
         },
         "required": ["question"],
     },
 )
 
+_PAST_PERCEPTION_TOOL_DEF = ToolDef(
+    name=_PAST_PERCEPTION_TOOL,
+    description=(
+        "Inspect a recorded camera frame only for an explicitly historical question, using a positive "
+        "seconds offset from the user's utterance time."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "Specific question about the recorded camera frame.",
+            },
+            "second_ago": {
+                "type": "integer",
+                "description": "Positive offset from the utterance time in seconds.",
+            },
+        },
+        "required": ["question", "second_ago"],
+    },
+)
+
+# Presented to the model in place of the native perception request schemas.
+_PERCEPTION_TOOL_DEFS: tuple[ToolDef, ...] = (
+    _LIVE_PERCEPTION_TOOL_DEF,
+    _PAST_PERCEPTION_TOOL_DEF,
+)
+
 # Spoken when a perception query is asked but no live camera frame can be
 # obtained. Short, user-actionable, never a hang or silent failure.
 _NO_FRAME_MSG = "I can't see a camera feed right now — please check your camera."
-
-# VLM guidance for the live-frame answer. Plain spoken English, terse.
-_PERCEPTION_SYSTEM_PROMPT = (
-    "You are looking at the user's live camera feed. Answer the question "
-    "directly from what is visible in the image, in one short plain-English "
-    "sentence. Never reply with JSON, code, or markdown."
-)
 
 # Brief human-readable progress message shown while a tool runs.
 _TOOL_PROGRESS: dict[str, str] = {
@@ -169,7 +189,6 @@ class RenderSceneProcessor(BrainProcessor):
         transport: XRMediaHubTransport,
         cfg: WorkerConfig,
         toolbox: NativeToolbox,
-        live_vision: Function,
         release_vision: Callable[[str], None],
         text_memory: Function | None,
         prompt_path: Path,
@@ -181,7 +200,6 @@ class RenderSceneProcessor(BrainProcessor):
         self._transport = transport
         self._cfg = cfg
         self._toolbox = toolbox
-        self._live_vision = live_vision
         self._release_vision = release_vision
         self._text_memory = text_memory
         self._prompt_path = prompt_path
@@ -307,8 +325,24 @@ class RenderSceneProcessor(BrainProcessor):
         text = text.strip()
         if not text:
             return
-
         send_pid = pid or self._transport.target_participant
+        # Bracket the whole turn with the client UI status signal: "processing"
+        # on entry, "idle" in finally so it always clears — including failure or
+        # a barge-in cancellation. The "processing" publish is INSIDE the try so
+        # a cancellation landing during that await still runs the finally (never
+        # leaving the client stuck in "processing"). Status is a per-client
+        # lifecycle signal owned by the render turn; the native vision functions
+        # stay reusable/UI-free.
+        try:
+            if send_pid:
+                await self._set_status("processing", send_pid)
+            async for chunk in self._run_turn_body(pid, send_pid, text):
+                yield chunk
+        finally:
+            if send_pid:
+                await self._set_status("idle", send_pid)
+
+    async def _run_turn_body(self, pid: str, send_pid: str, text: str) -> AsyncIterator[str]:
         # Capture the moment the user finished speaking so visual tool calls
         # can be anchored to that timestamp (not to when the tool fires).
         ref_us = _now_us()
@@ -878,7 +912,7 @@ class RenderSceneProcessor(BrainProcessor):
                     ", ".join(f"{k}={v}" for k, v in args.items()),
                 )
                 try:
-                    result = await self._execute_tool(name, args, pid=pid)
+                    result = await self._execute_tool(name, args, pid=pid, ref_us=ref_us)
                 except _SceneNotReadyError:
                     return "The XR scene isn't ready yet. Please click 'Launch XR' to start the headset session first."
                 except _PerceptionUnavailableError as exc:
@@ -902,30 +936,46 @@ class RenderSceneProcessor(BrainProcessor):
     # ── live-frame perception (look_at_current_frame) ─────────────────────────
 
     async def _look_at_current_frame(self, pid: str, question: str) -> dict:
-        """Run the native live-vision function for the active participant.
+        """Answer a live-camera question through the native perception tool.
 
-        Returns a dict the agentic loop relays:
-          {"answer": "<vlm text>"}                  on success
-          {"error":  "<reason>", "spoken": "..."}   on graceful failure
-
-        On a failure the user should hear, the dict carries a short ``spoken``
-        message; the loop relays the answer/error text and never hangs.
+        The ``xr_vision_tools`` group exposes ``look_at_current_frame`` over the
+        always-on live frame source. The processor injects the active
+        participant (which the model never supplies) and raises
+        ``_PerceptionUnavailableError`` when no fresh frame or VLM answer is
+        available so the turn ends with a short spoken message rather than
+        looping or failing silently.
         """
         if not pid:
-            return {"error": "no active participant", "spoken": _NO_FRAME_MSG}
+            raise _PerceptionUnavailableError(_NO_FRAME_MSG)
         _trace_log.info("LOOK  {}", question[:120])
         try:
-            result = await self._live_vision.ainvoke(
-                VisionRequest(participant_id=pid, query=question),
+            result = await self._toolbox.invoke(
+                _LIVE_PERCEPTION_TOOL,
+                {"participant_id": pid, "question": question},
             )
-            answer = result.text
-            if result.status == "unavailable":
-                return {"error": answer, "spoken": _NO_FRAME_MSG}
-            _trace_log.info("VLM   {}", answer[:200])
-            return {"answer": answer}
         except Exception as exc:
             logger.exception("look_at_current_frame failed")
-            return {"error": str(exc), "spoken": _NO_FRAME_MSG}
+            raise _PerceptionUnavailableError(_NO_FRAME_MSG) from exc
+        _trace_log.info("VLM   {}", str(result.get("answer", ""))[:200])
+        return result
+
+    async def _look_at_past_frame(self, pid: str, args: dict, ref_us: int) -> dict:
+        """Answer a recorded-camera question through the native perception tool.
+
+        Injects the active participant and the utterance timestamp (never model
+        supplied); the model provides the question and a positive seconds
+        offset. A lookup failure is returned to the model as an error dict —
+        unlike the live path, a missing recorded frame does not end the turn.
+        """
+        return await self._call_tool(
+            _PAST_PERCEPTION_TOOL,
+            {
+                "participant_id": pid,
+                "question": str(args.get("question") or "").strip(),
+                "second_ago": args.get("second_ago", 0),
+                "reference_time_us": ref_us,
+            },
+        )
 
     # ── tool routing ──────────────────────────────────────────────────────────
 
@@ -935,37 +985,20 @@ class RenderSceneProcessor(BrainProcessor):
         args: dict,
         *,
         pid: str = "",
+        ref_us: int = 0,
     ) -> dict | str | None:
-        """Invoke a native tool or the participant-aware live-vision path."""
+        """Invoke a native tool or a participant-aware perception path."""
         # Live perception needs participant context that is not model supplied. Intercept
         # before _normalize_tool_args (which would strip the question text if
         # it ever produced an empty value) and before native invocation.
-        if tool == _PERCEPTION_TOOL:
-            question = str(args.get("question") or "").strip()
-            result = await self._look_at_current_frame(pid, question)
-            # Deterministic graceful failure: end the turn with the spoken
-            # message instead of feeding an error back to the model (which a
-            # flaky 30B might silently swallow → the "hangs in thinking" bug).
-            if isinstance(result, dict) and result.get("spoken"):
-                raise _PerceptionUnavailableError(result["spoken"])
-            return result
+        if tool == _LIVE_PERCEPTION_TOOL:
+            return await self._look_at_current_frame(pid, str(args.get("question") or "").strip())
+        if tool == _PAST_PERCEPTION_TOOL:
+            return await self._look_at_past_frame(pid, args, ref_us)
 
         # Normalize nested dicts that the LLM sometimes generates instead of
         # flat scalar args — e.g. {"position": {x,y,z}} → x=, y=, z=.
         args = normalize_tool_args(args)
-
-        # Guard against fabricated paths: the model must acquire a recorded
-        # frame first and pass the returned path to the native vision function.
-        if tool == "ask_image":
-            path = args.get("image_path", "")
-            if path and not os.path.isfile(path):
-                return {
-                    "error": (
-                        f"File not found: {path!r}. "
-                        "You must call get_frame_from_time first to get the "
-                        "real image path, then pass that path to ask_image."
-                    )
-                }
 
         result = await self._call_tool(tool, args)
         if isinstance(result, dict) and result.get("reason") == "not_started":
@@ -1014,6 +1047,15 @@ class RenderSceneProcessor(BrainProcessor):
             )
         except Exception:
             logger.exception("send failed  topic={}", topic)
+
+    async def _set_status(self, status: str, pid: str) -> None:
+        """Publish the per-client UI status ('processing' / 'idle') on the
+        reserved ``_agent.status`` channel. Best-effort: it runs from a finally
+        during cancellation, so a failed publish must never break the turn."""
+        try:
+            await self._transport.endpoint.set_status(status, pid)
+        except Exception:
+            logger.opt(exception=True).debug("set_status({!r}) failed", status)
 
     async def on_participant_left(self, pid: str) -> None:
         """Release cached native live-frame state after participant cleanup."""

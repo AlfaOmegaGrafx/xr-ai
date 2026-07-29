@@ -38,7 +38,11 @@ SYS_PROMPT  = (_HERE / "../worker/prompts/system.txt").resolve()
 sys.path.insert(0, str((_HERE / "../worker").resolve()))
 from capabilities import build_native_toolbox  # noqa: E402
 from config import load_config  # noqa: E402  — must follow sys.path tweak
-from processors import _PERCEPTION_TOOL_DEF  # noqa: E402
+from processors import (  # noqa: E402  — must follow sys.path tweak
+    _LIVE_PERCEPTION_TOOL,
+    _PAST_PERCEPTION_TOOL,
+    _PERCEPTION_TOOL_DEFS,
+)
 _WORKER_CFG = load_config((_HERE / "../yaml/xr_render_demo_worker.yaml").resolve())
 
 def _agent_llm_base_url() -> str:
@@ -1379,17 +1383,36 @@ def _format_pose(pose: dict) -> str:
     )
 
 
+class _NullFrameEndpoint:
+    """Frame endpoint stub for offline tool-schema discovery.
+
+    The eval never pulls live pixels; it only needs the vision group to build so
+    ``look_at_current_frame`` / ``look_at_past_frame`` appear in the tool schema.
+    """
+
+    def on_frame(self, _cb) -> None:
+        pass
+
+    def on_participant(self, _cb) -> None:
+        pass
+
+
 async def _discover_tools() -> list[dict]:
     async with WorkflowBuilder() as builder:
-        toolbox = await build_native_toolbox(
+        toolbox, _vision_config = await build_native_toolbox(
             builder,
             scene_endpoint=_WORKER_CFG.scene_endpoint,
             openxr_endpoint=_WORKER_CFG.openxr_endpoint,
             video_memory_endpoint=_WORKER_CFG.video_memory_endpoint,
+            frame_endpoint=_NullFrameEndpoint(),
             vlm=object(),
         )
-        definitions = toolbox.definitions(exclude=WORKER_MANAGED)
-        definitions.append(_PERCEPTION_TOOL_DEF)
+        # Present the model trimmed perception schemas (the worker injects the
+        # participant/reference context the native request models expose).
+        definitions = toolbox.definitions(
+            exclude=WORKER_MANAGED | {_LIVE_PERCEPTION_TOOL, _PAST_PERCEPTION_TOOL}
+        )
+        definitions.extend(_PERCEPTION_TOOL_DEFS)
         return [definition.to_openai() for definition in definitions]
 
 
