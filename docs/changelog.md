@@ -32,6 +32,39 @@ likewise kept as a deprecated alias. Import from
 `xr_ai_nat.functions.video_memory` (or its `._client` submodule) going forward;
 the aliases will be removed in a future version.
 
+### 2026-07-27 — Text-memory adopts typed request/result models
+
+The native `text_memory` capability now speaks explicit `_StrictRequest`
+request models and typed result models instead of returning errors as data.
+`add_transcript` rejects blank text at the request boundary
+(`Field(min_length=1)` plus a `field_validator`) rather than emitting a
+`TextMemoryError`, and `get_transcript_stats` for an unknown source returns a
+`TranscriptStatsResult` with `count=0` and null `earliest_us`/`latest_us`
+rather than an error. `query_transcripts` and `list_sources` return objects
+(`{"segments": …}`, `{"sources": …}`) in place of bare lists. The store and
+schemas modules fold into `functions.py`: the private `_store.py` is removed
+outright, while `schemas.py` survives as a deprecated forwarding alias (warns on
+import). It keeps `TranscriptSegment` (unchanged) and `TranscriptStats` — which
+was renamed to `TranscriptStatsResult` but kept the same fields (only
+`earliest_us`/`latest_us` widened `int` → `int | None`), so it stays as a
+deprecated alias. **Genuine removals** (no alias): `OperationResult` and
+`TextMemoryError`, because the typed API validates input and returns typed
+results instead of error-as-data. Import from
+`xr_ai_nat.functions.text_memory` going forward. The
+path-escape guard is preserved: every `.identity`/`.jsonl` path is wrapped in
+`_check()` (`resolve()` + `is_relative_to(root)`) before it is read or used,
+including the `glob("*.identity")` loops, so a symlinked identity file is never
+followed. The `transcript-mcp` compatibility shim keeps republishing the four
+legacy tools over the new typed surface; because it no longer applies the
+`untyped_outputs` unwrapping, its `query_transcripts` and `list_sources` MCP
+outputs are now the typed objects (`{"segments": …}`, `{"sources": …}`) rather
+than the bare lists the earlier shim emitted — a deliberate wire-shape change
+that aligns the shim with the typed native API. Participant-oriented
+`recall_conversation` is deferred to land with its producer (the future
+`record_voice_transcripts` writer that stores `{participant_id}:{role}`
+sources); the render worker currently writes transcripts under the bare
+`participant_id`, so wiring recall now would return empty history.
+
 ### 2026-07-27 — MCP export lives under `xr_ai_nat.mcp`
 
 The generic native-function → MCP publisher moved from
