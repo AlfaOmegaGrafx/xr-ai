@@ -9,6 +9,54 @@ Significant decisions, in reverse-chronological order. Update this whenever a
 non-trivial architectural or design decision is made so the rationale is
 preserved and not re-litigated.
 
+### 2026-07-28 — Introduce `xr-ai-voice` alongside `xr-ai-pipecat`
+
+Added the `xr-ai-voice` SDK package (`agent-sdk/xr-ai-voice`), a voice runtime
+exposing `VoiceSession` plus the `VoiceHandler`/`VoiceQuery`/`VoiceResponse`/
+`VoiceTurn` handler surface and `HubVoiceTransport`. It is introduced alongside
+the existing `xr-ai-pipecat`; neither package is removed and no sample migrates
+onto voice yet (there are no consumers). Readiness is health-based (split across
+`_readiness`/`_session`); if #300's request-readiness lands, it folds into
+`_readiness` when samples migrate.
+
+The voice runtime anchors every turn to when the participant actually spoke: the
+hub's ``AudioChunk.pts_us`` is carried forward on pipecat's presentation
+timestamp, ``VadSttProcessor`` captures the value at speech onset and stamps it
+onto the transcript, and ``VoiceGateProcessor`` uses it for the dispatched
+query's ``pts_us`` (falling back to wall clock only for a transcript with no
+originating audio). Stamping wall clock after STT instead baked VAD hangover plus
+transcription latency into the timestamp, and that error would persist into
+stored transcripts and time-relative recorded-frame lookups. Pipeline shutdown is
+also complete: ``EndFrame``/``CancelFrame`` cancels and awaits in-flight handler
+turns and tears down pending early-STT probe tasks, so neither a turn nor a probe
+can emit text or write a transcript after the session has ended.
+
+The voice runtime is participant-scoped for the repository's one-hub/many-clients
+model, and every teardown path is scoped the same way: a ``ParticipantLeftFrame``
+releases just the departing participant's synthesis state (before the frame
+reaches the output transport, which drops that pid's media sender — otherwise a
+lingering synth task could emit audio afterwards and the transport's lazy routing
+would recreate the sender it had just released), and a pid-less interruption
+drains every participant *and* flushes each of their hub audio rather than only
+the fallback target's. `StreamingTtsProcessor` keys its pending text, synthesis/order queue,
+sender task, interruption, and hub flush by participant id, so concurrent
+participants never share a buffer (which would splice their words) or a sender
+(which would misroute audio); an `InterruptionFrame` scopes to its
+`transport_source` pid — the handler's supersede interrupt now carries that pid.
+Per-participant transport `MediaSender`s are released on `ParticipantLeftFrame`
+and every sender task is torn down on pipeline `EndFrame`/`CancelFrame`, so
+join/leave churn and shutdown retain no state. The `on_query_superseded` callback
+fires only when a new query actually replaces a still-in-flight turn (not for a
+queued follow-up or a query after the previous turn finished).
+
+The voice runtime's `VoiceGateProcessor` relies on the wake-gate's partial-wake
+/ early-chime helpers (`VoiceGate.begin_utterance`, `wake_ack_enabled`,
+`matches_magic_phrase`, `could_match_magic_phrase`, and `play_chime` returning
+whether audio was emitted). These are additive superset helpers not yet present
+in `xr-ai-voicegate` on main, so `utils/xr-ai-voicegate/{gate,config}.py` are
+extended with them in the same change. The additions are backward-compatible:
+existing `xr-ai-voicegate`/`xr-ai-pipecat` callers ignore the `play_chime`
+return value, and their tests continue to pass.
 ### 2026-07-27 — Native vision exposes current- and recorded-frame tools
 
 The `xr_ai_nat` vision capability drops the path-based `xr_vision`/`ask_image`
