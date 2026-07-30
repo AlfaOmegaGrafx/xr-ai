@@ -20,6 +20,35 @@ result to `bytearray.extend()` dropped every frame with
 historical-video GPU fixture follows the same contract and no longer masks type
 errors as unavailable NVENC hardware.
 
+### 2026-07-29 — Hub client renamed: `xr_ai_agent` → `xr_ai_hub` (`xr-ai-hub-client`)
+
+The name `xr_ai_agent` had drifted from what the package is: an agent-side
+*client for the hub*, not the agent. It also occupied the `agent-sdk/` root, so
+the directory that holds every SDK package was itself one of them — leaving
+nowhere to state a dependency rule about the hub client specifically, and
+forcing `agent-sdk/pyproject.toml` into unrelated CI cache keys.
+
+The module `xr_ai_agent` becomes `xr_ai_hub`, and its distribution moves from the
+`agent-sdk/` root (`xr-ai-agent`) into its own package directory
+`agent-sdk/xr-ai-hub-client/` (`xr-ai-hub-client`), leaving `agent-sdk/` a plain
+container. In-tree consumers import `xr_ai_hub` and depend on `xr-ai-hub-client`.
+
+**Breaking: the distribution name changed.** `xr-ai-agent` no longer resolves —
+anything declaring that dependency must switch to `xr-ai-hub-client`. Every
+in-tree consumer is an editable path dependency and is updated in this same
+change, and the package is not published, so no compatibility distribution is
+shipped. The *import* API is a different matter and is preserved: because
+`xr_ai_agent` was a public top-level import, the `xr-ai-hub-client` distribution
+ships a deprecated `xr_ai_agent` package that forwards to `xr_ai_hub` and emits a
+`DeprecationWarning` on import. That alias only helps once a consumer has already
+switched its dependency declaration; it will be removed in a future version.
+
+Two small type-checking tweaks ride along: `cast(bytes, …)` in `_codec` and
+`memoryview` None-narrowing in `_shm`. `LiveFrameSource` is carried over
+unchanged — it keeps multi-waiter `get()`, `participants()`, and participant-leave
+auto-release because the video-mcp live-frame exporter calls `participants()` in
+two places, so slimming it here would break a live consumer.
+
 ### 2026-07-29 — xr-ai-models internal modules are privatized
 
 The `xr-ai-models` implementation modules `config.py`, `factory.py`,
