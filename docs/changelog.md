@@ -9,6 +9,39 @@ Significant decisions, in reverse-chronological order. Update this whenever a
 non-trivial architectural or design decision is made so the rationale is
 preserved and not re-litigated.
 
+### 2026-07-28 — Voice adapters and conversation recall
+
+Added `xr_ai_nat.adapters.voice` (`as_voice_handler`, `record_voice_transcripts`)
+— the bridge between native NAT functions and an `xr-ai-voice` `VoiceSession`.
+`adapters/voice` imports `xr-ai-voice`, so it is gated behind a new
+`xr-ai-nat[voice]` optional extra rather than a hard dependency.
+
+`record_voice_transcripts` is the producer that stores completed turns under
+`{participant_id}:user` / `{participant_id}:agent` sources. With that producer
+now landing, the `xr_conversation_memory` function group (`recall_conversation`)
+— deferred out of the text-memory PR because it had no producer on main — is
+re-introduced here, alongside an end-to-end record→recall test. It reads those
+role-scoped sources back through the existing typed `query_transcripts` and
+returns timestamp-ordered `ConversationEntry` turns for one participant. A real
+exchange gives the user turn and the agent turn the same timestamp (both carry
+the originating query's time), so recall orders that tie user-before-agent.
+
+Because agents consume these schemas, the whole recall surface is described:
+every `ConversationEntry` field and `RecallConversationResult.entries` carry
+descriptions, `role` is constrained to `Literal["user", "agent"]` — the only two
+values the producer writes — and the config's `text_memory` reference documents
+which group recall reads from. A regression asserts the generated request/result
+contract keeps its descriptions and the `role` enum.
+
+Both adapters are re-exported from the `xr_ai_nat.adapters` package namespace,
+which is the documented import path. The re-export is lazy (PEP 562
+`__getattr__`) because the adapters need the optional extra: importing
+`xr_ai_nat.adapters` without it still succeeds, and only attribute access
+raises — with an error naming the extra to install. Lazy access also keeps the
+deprecated `adapters.mcp` alias from emitting its warning on an unrelated import
+of the package. The `xr-ai-nat` README documents the `[voice]` extra, both
+adapters, `xr_conversation_memory`, and how transcript recording feeds recall.
+
 ### 2026-07-28 — Introduce `xr-ai-voice` alongside `xr-ai-pipecat`
 
 Added the `xr-ai-voice` SDK package (`agent-sdk/xr-ai-voice`), a voice runtime
