@@ -7,7 +7,7 @@
 
 This page describes the architecture of the xr-render-demo sample. For the
 user-facing
-quickstart, refer to the [main README](https://github.com/NVIDIA/xr-ai/blob/main/README.md#xr-render-demo-voice-driven-sphere-in-cloudxr).
+quickstart, refer to the [repository README](https://github.com/NVIDIA/xr-ai/blob/main/README.md#xr-render-demo-voice-driven-sphere-in-cloudxr).
 For inference-server mechanics shared with other samples, refer to
 [`docs/ai-services.md`](https://github.com/NVIDIA/xr-ai/blob/main/docs/ai-services.md).
 
