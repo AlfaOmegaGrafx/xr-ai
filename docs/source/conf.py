@@ -80,6 +80,12 @@ html_theme = "nvidia_sphinx_theme"
 html_show_sphinx = False
 html_title = "XR AI"
 templates_path = ["_templates"]
+html_static_path = ["_static"]
+html_css_files = ["css/custom.css"]
+
+# Named ``versioning.html`` so it does not shadow the theme's own
+# ``version-switcher.html`` navbar component, which stays inert unconfigured.
+html_sidebars = {"**": ["versioning.html", "sidebar-nav-bs"]}
 
 
 def setup(app):
