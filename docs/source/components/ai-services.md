@@ -180,9 +180,9 @@ exposes `/v1/health`.
 ## vLLM model persistence
 
 The persistent vLLM-backed servers (`vlm_server`, `llama_nemotron_llm_server`,
-`nemotron3_nano_llm_server`, `embedding_server`) **survive stack restarts by design**.
-`nemotron_omni_llm_server` is foreground (dies with the wrapper). Each
-persistent wrapper script checks its health endpoint before spawning vLLM:
+`nemotron3_nano_llm_server`, `nemotron_omni_llm_server`, `embedding_server`)
+**survive stack restarts by design**. Each persistent wrapper script checks its
+health endpoint before spawning vLLM:
 
 - **Already running** → touch the ready file immediately, then idle. Stack is
   ready in seconds; no model reload.
@@ -200,11 +200,12 @@ vLLM keeps running.
 uv run xr_render_demo --stop
 ```
 
-This hits each model server's `/health` endpoint, then either runs
-`docker stop <container_name>` (docker-mode servers) or finds the listening
-PID via `ss` or `lsof` and sends `SIGTERM` (pip-mode), escalating to
-`docker kill` or `SIGKILL` after 20 s. It is safe to run while the stack is
-down — processes and containers that are not running are silently skipped.
+Cleanup locates labelled Docker containers before inspecting ports, then
+stops them with `docker stop` (escalating to `docker kill` after 20 s).
+Pip-mode processes must carry the `XR_AI_VLLM_MANAGED` and
+`XR_AI_VLLM_PORT` ownership markers before cleanup sends `SIGTERM` or
+`SIGKILL`. Unknown listeners and failed inspection abort cleanup without
+sending a signal; absent servers are silently skipped.
 
 The target ports and container names match the defaults in the per-profile YAML files.
 
@@ -258,19 +259,23 @@ Existing `~/.docker/config.json` entries take priority and are not overwritten.
   `xr-ai-vllm-llama-nemotron-llm-server`,
   `xr-ai-vllm-nemotron3-nano-llm-server`,
   `xr-ai-vllm-nemotron-omni-llm-server`.
-- Persistence parity: `vlm_server`, `llama_nemotron_llm_server`, and
-  `nemotron3_nano_llm_server` run detached (`docker run -d --rm --name …`) so
-  the container survives stack restarts, mirroring their pip-mode
-  `start_new_session=True` behavior. `nemotron_omni_llm_server` runs
-  foreground (container exits with the wrapper) — same as its pip-mode
-  semantics.
+- Persistence parity: `vlm_server`, `llama_nemotron_llm_server`,
+  `nemotron3_nano_llm_server`, and `nemotron_omni_llm_server` launch their
+  Docker processes in separate sessions, so they survive launcher shutdowns
+  like their pip-mode `start_new_session=True` counterparts.
 
 ### Cleanup
 
-`uv run xr_render_demo --stop` works for both modes. The cleanup path probes
-`/health` first; for docker mode it then runs `docker stop <container_name>`
-(escalating to `docker kill` after 20 s); for pip mode it falls back to the
-port → PID → SIGTERM/SIGKILL path. Same UX for both.
+`uv run xr_render_demo --stop` works for both modes. Cleanup locates labelled
+Docker containers before inspecting ports, then stops them with `docker stop`
+(escalating to `docker kill` after 20 s). Pip-mode processes carry an
+`xr-ai-vllm` ownership marker; unknown listeners and failed inspection abort
+cleanup without sending a signal.
+
+Pip-mode vLLM processes started before the ownership markers were introduced
+cannot be identified safely. After upgrading, stop each unmarked process
+manually once; subsequent launches include the markers and support managed
+cleanup.
 
 ## Per-server notes
 
@@ -306,8 +311,7 @@ port → PID → SIGTERM/SIGKILL path. Same UX for both.
   `use_bf16: true` for highest quality at the largest VRAM cost. Same
   OpenAI-compatible HTTP contract as the other LLM servers — swap the port to
   swap backends. Hosting backend is selectable per YAML (refer to *Choosing the
-  vLLM runtime*); runs foreground in both pip and docker modes (no
-  cross-restart persistence).
+  vLLM runtime*); persists across stack restarts in both pip and docker modes.
 - **stt-server** loads parakeet-tdt-0.6b-v3 via NeMo ASR in-process.
   English-only; the `language` and `temperature` form fields are accepted but ignored.
 - **tts/magpie** loads magpie_tts_multilingual_357m via NeMo TTS in-process.
