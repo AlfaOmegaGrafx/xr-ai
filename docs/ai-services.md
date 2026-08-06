@@ -246,7 +246,7 @@ another tag, an internal mirror, or a custom build.
 
 - **Docker Engine** with the user in the `docker` group (`docker version`
   must succeed without `sudo`).
-- **NVIDIA Container Toolkit** so `--gpus` works:
+- **NVIDIA Container Toolkit** so the `nvidia` runtime can expose GPUs:
   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 - **NGC pull access** for `nvcr.io/nvidia/vllm`. The wrapper auto-runs
   `docker login nvcr.io` if `NGC_API_KEY` is in the environment (loaded by
@@ -266,6 +266,9 @@ Existing `~/.docker/config.json` entries take priority and are not overwritten.
   the legacy `--gpus` flag so the launch works under both legacy and CDI
   container-toolkit modes; `--ipc host` gives vLLM the shared-memory region
   its workers expect.
+- The launcher overrides the image entrypoint with `/bin/bash`, installs any
+  required wheels, then executes `vllm serve`. Failed stopped containers are
+  recreated because Docker cannot change their recorded entrypoint or command.
 - The host `model_cache` is bind-mounted at the same path inside the
   container and `HF_HOME` is set to it, so weights cached by pip mode are
   reused by docker mode and vice versa.

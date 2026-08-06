@@ -235,7 +235,7 @@ another tag, an internal mirror, or a custom build.
 
 - **Docker Engine** with the user in the `docker` group (`docker version`
   must succeed without `sudo`).
-- **NVIDIA Container Toolkit** so `--gpus` works:
+- **NVIDIA Container Toolkit** so the `nvidia` runtime can expose GPUs:
   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 - **NGC pull access** for `nvcr.io/nvidia/vllm`. The wrapper auto-runs
   `docker login nvcr.io` if `NGC_API_KEY` is in the environment (loaded by
@@ -250,8 +250,11 @@ Existing `~/.docker/config.json` entries take priority and are not overwritten.
 
 ### docker mode — runtime details
 
-- Container is launched with `--network host --ipc host --gpus …` (matches
-  gives vLLM the shared-memory region its workers expect).
+- Container is launched with `--network host --ipc host --runtime nvidia`
+  (forwarding `NVIDIA_VISIBLE_DEVICES`), and `/bin/bash` overrides the image
+  entrypoint so setup installs run before `vllm serve`.
+- Failed stopped containers are recreated because Docker cannot change their
+  recorded entrypoint or command.
 - The host `model_cache` is bind-mounted at the same path inside the
   container and `HF_HOME` is set to it, so weights cached by pip mode are
   reused by docker mode and vice versa.

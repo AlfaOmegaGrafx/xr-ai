@@ -9,6 +9,15 @@ Significant decisions, in reverse-chronological order. Update this whenever a
 non-trivial architectural or design decision is made so the rationale is
 preserved and not re-litigated.
 
+### 2026-08-05 — Docker vLLM setup owns the image entrypoint
+
+The shared vLLM Docker launcher explicitly selects `/bin/bash` before installing
+model-specific wheels and executing `vllm serve`. The Omni profile's
+`vllm/vllm-openai:v0.20.0` image otherwise interprets the setup command through
+its default `vllm serve` entrypoint. Failed stopped containers are recreated
+rather than restarted because Docker cannot update their recorded entrypoint or
+command.
+
 ### 2026-08-04 — Model servers select one multimodal stack
 
 `model_servers` defaults to the separate Nemotron-3 Nano and Cosmos services,
