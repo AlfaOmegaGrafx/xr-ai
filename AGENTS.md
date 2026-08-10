@@ -174,7 +174,8 @@ pipecat internally):
 - **Voice session** — `VoiceSession.run(handler)` privately assembles
   `input → VadStt → VoiceGate → handler → StreamingTts → output`, owns model
   readiness and ready-file semantics, installs signal handlers, and closes the
-  transport and model clients.
+  transport and model clients. It touches the ready file only after the input
+  transport has entered its hub IPC receive loop.
 - **Native handler** — `xr_ai_nat.adapters.as_voice_handler` maps a typed NAT
   function onto `VoiceSession`; `TextMessageInput` routes participant text
   through the same turn path as speech.
@@ -184,7 +185,9 @@ pipecat internally):
   always-on). No sample code — config only.
 
 `xr-ai-pipecat` remains available for samples that still subclass its
-`BrainProcessor`; this migration does not remove it.
+`BrainProcessor`; those workers run the assembled pipeline with
+`run_voice_pipeline(worker, transport, on_ready=ready_file.touch)` so they use
+the same IPC-start readiness boundary.
 
 A native voice sample adapts its NAT function to `VoiceSession`; wake-word
 behavior comes from config alone.

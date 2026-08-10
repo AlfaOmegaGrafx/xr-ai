@@ -62,7 +62,8 @@ xr-ai-pipecat  (agent-sdk/xr-ai-pipecat/)
     16 kHz int16 for STT, converts TTS int16 PCM back to float32 AudioChunks
     for return. SttClient / TtsClient are thin wrappers around xr-ai-models'
     OpenAICompatSTT / OpenAICompatTTS; httpx is retained for http_probe()
-    readiness checks.
+    readiness checks. ``run_voice_pipeline`` releases a launcher's ready-file
+    callback only after the input transport starts its hub IPC receive loop.
     Not a dep of xr-ai-hub-client itself — import only in workers that use Pipecat.
 
 xr-ai-voice  (agent-sdk/xr-ai-voice/)
@@ -79,10 +80,12 @@ xr-ai-voice  (agent-sdk/xr-ai-voice/)
     ``VoiceSession`` public API plus the ``VoiceHandler`` / ``VoiceQuery`` /
     ``VoiceResponse`` / ``VoiceTurn`` handler surface, ``HubVoiceTransport``,
     ``VadConfig``, and ``TextMessageInput``; Pipecat, audio framing, and
-    pipeline processors are implementation details. Readiness is health-based,
-    split across the ``_readiness`` / ``_session`` modules. Not a dep of
-    xr-ai-hub-client itself — import only in workers that opt into the voice
-    runtime.
+    pipeline processors are implementation details. Service health gates
+    transport construction, while ``VoiceSession.run`` touches its ready file
+    only after the input transport starts its hub IPC receive loop. The
+    readiness contract is split across the ``_readiness`` / ``_session``
+    modules. Not a dep of xr-ai-hub-client itself — import only in workers that
+    opt into the voice runtime.
 
 xr-ai-voicegate  (utils/xr-ai-voicegate/)
     └── numpy >=1.24

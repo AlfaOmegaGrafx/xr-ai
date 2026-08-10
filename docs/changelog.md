@@ -9,6 +9,16 @@ Significant decisions, in reverse-chronological order. Update this whenever a
 non-trivial architectural or design decision is made so the rationale is
 preserved and not re-litigated.
 
+### 2026-08-10 — Voice-worker ready files wait for inbound IPC
+
+`VoiceSession` and the direct `run_voice_pipeline` compatibility path release a
+managed worker's ready file only after the input transport has started its hub
+IPC receive loop. Participant roster catch-up remains asynchronous, so process
+readiness stays a launcher concern rather than a per-client discovery barrier.
+The endpoint stores each agent's current status and the pipeline re-announces
+that state periodically; a late or reconnecting client therefore converges
+without relying on a one-shot event.
+
 ### 2026-08-05 — Docker vLLM setup owns the image entrypoint
 
 The shared vLLM Docker launcher explicitly selects `/bin/bash` before installing
