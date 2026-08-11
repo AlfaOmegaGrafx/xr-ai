@@ -3,11 +3,64 @@
   SPDX-License-Identifier: Apache-2.0
 -->
 
-# XR AI functions for NeMo Agent Toolkit
+# XR AI native tools
 
-`xr-ai-nat` provides typed, in-process XR functions for NVIDIA NeMo Agent
-Toolkit (NAT). Applications compose these functions directly; process-backed
-or MCP compatibility adapters remain separate boundaries.
+`xr-ai-nat` is the toolkit-independent native tools layer for XR AI.
+`Tool` gives voice, background triggers, and model-driven agents one typed
+Pydantic invocation interface. NeMo Relay manages every new tool execution;
+model-backed tools use injected `xr-ai-models` services rather than exposing a
+model client to an application trigger.
+
+The existing NeMo Agent Toolkit function groups remain available through legacy
+extras while their concrete capabilities migrate. They are compatibility code,
+not the destination for new tools.
+
+## Native tools and tool-driven agents
+
+The base install supplies `Tool`, `AgentRunner`, and `as_agent_tool`. Install
+`xr-ai-nat[relay]` for the bundled bounded tool-driven `Agent`:
+
+```python
+from pydantic import BaseModel
+from xr_ai_nat import Tool
+from xr_ai_nat.agents import Agent
+
+
+class LookupRequest(BaseModel):
+    query: str
+
+
+class LookupResult(BaseModel):
+    answer: str
+
+
+async def lookup(request: LookupRequest) -> LookupResult:
+    return LookupResult(answer=request.query)
+
+
+lookup_tool = Tool(
+    "lookup",
+    "Look up one answer.",
+    LookupRequest,
+    LookupResult,
+    lookup,
+)
+agent = Agent(
+    name="assistant",
+    llm=llm,
+    system_prompt="Use the available tools.",
+    tools=(lookup_tool,),
+)
+```
+
+`AgentRunner` is the small async turn protocol behind `as_agent_tool(...)`.
+The bundled `Agent` is the basic stateless tool loop; applications can expose a
+custom, Fabric-backed, or framework-backed runner through the same registered
+`Tool`. That keeps voice, text, and autonomous background work on one
+invocation path. Relay observes model calls inside a tool-backed runner; the
+application never calls an LLM client as a separate control path.
+
+## Legacy NAT compatibility
 
 ## Shared value models and the service boundary
 
@@ -22,7 +75,7 @@ Capabilities that talk to an out-of-process service share one private transport,
 `RPCServer`). `_service` owns only the transport; the value models above live in
 `functions.types`, not in `_service`.
 
-## Model-backed agents
+## Legacy NAT model bridge
 
 Install `xr-ai-nat[agents]` to make an `xr-ai-models` `LLMService` available
 to NAT's built-in LangChain-backed agent types without bypassing the repository
