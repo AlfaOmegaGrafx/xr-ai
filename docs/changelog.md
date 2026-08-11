@@ -93,6 +93,27 @@ published version. Repository links are rewritten while each documentation
 version is read, so historical release pages point to their matching tag. Only
 `main` and `v*` tags are eligible to deploy, so pull requests remain build-only.
 
+### 2026-07-31 — Model-serving projects share the services root
+
+The VLM, STT, LLM, TTS, and embedding server projects now live as direct
+children of `services/`. A common project depth makes process declarations,
+editable dependency paths, and operational ownership predictable while
+preserving each package name, command, port, and serving behavior.
+
+The move normalizes the standalone VLM, STT, Nemotron 3 Nano, Nemotron Omni,
+Magpie TTS, and Piper TTS reference configurations to the repository-level
+`models/` directory. Their previous ignored caches remain under
+`ai-services/models/` or `ai-services/tts/models/` because Git cannot move
+untracked weights. Operators must merge those directories before an offline
+start; `docs/ai-services.md` documents a non-clobbering migration procedure.
+Sample-owned model configurations and the standalone Llama Nemotron and
+embedding configurations already resolved to the repository-root cache.
+
+MCP compatibility adapters remain under `agent-mcp-servers/`. The render demo
+adopts the mechanical model-service paths in its orchestrator and corrects one
+stale path in a YAML comment; its worker, scene, prompts, evaluations, and
+architecture are unchanged.
+
 ### 2026-07-31 — Separate model behavior, endpoints, and deployment ownership
 
 Model configuration accepts a nested profile with independent `adapter`,
