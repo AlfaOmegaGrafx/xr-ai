@@ -117,7 +117,8 @@ frames are dropped if it is closed.
 | Hub service | `services/xr-media-hub/` | XR-Media-Hub + LiveKit internal transport |
 | Launcher | `utils/xr-ai-launcher/` | stdlib-only process manager used by samples |
 | Logging | `utils/xr-ai-logging/` | shared loguru sink + stdlib bridge for every process |
-| Agent tools | `agent-sdk/xr-ai-nat/` | Relay-managed native tools and legacy NAT compatibility during migration |
+| Agent tools | `agent-sdk/xr-ai-tools/` | Toolkit-independent Relay-managed native tools |
+| Legacy NAT | `agent-sdk/xr-ai-nat/` | NeMo Agent Toolkit compatibility during migration |
 | Reusable services | `services/` | Model-serving and typed capability processes |
 | Agent interfaces | `agent-mcp-servers/` | MCP compatibility processes for XR data & rendering |
 | Agent demos | `agent-samples/` | End-to-end agent pipelines |
@@ -195,7 +196,7 @@ channel, or send the literal text `"ping"` — all routes go through the
 same VLM pipeline against the latest video frame.  Replies arrive as
 streaming Piper TTS audio plus a `vlm.response` text message.
 
-The packaged worker composes the NAT-native streaming vision function with
+The packaged worker adapts the transport-independent `StreamingVisionTool` to
 `xr-ai-voice`'s `VoiceSession`; Pipecat remains private to that runtime and no
 MCP client is involved. See the
 [sample README](agent-samples/simple-vlm-example/README.md) for the worker

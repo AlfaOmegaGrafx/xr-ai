@@ -9,16 +9,34 @@ Significant decisions, in reverse-chronological order. Update this whenever a
 non-trivial architectural or design decision is made so the rationale is
 preserved and not re-litigated.
 
-### 2026-08-12 — Agentic vision is finite; direct voice may stream
+### 2026-08-12 — Tool-call handling is not an agent runtime
+
+`agents.py`, `agent_runner.py`, `Agent`, and `AgentRunner` are removed.
+`tool_calling.py` only adapts native schemas to model `ToolDef` values and
+handles one model-produced `ToolCall` at a time. Applications own prompts, model
+calls, history, iteration, and concurrency.
+
+The unused NAT `StreamingVisionConfig` and its schemas are also removed because
+`StreamingVisionTool` replaces that surface. The still-used `VisionToolsConfig`
+remains in NAT because its recorded-frame tool has no native replacement yet.
+
+### 2026-08-12 — Native tools live outside the NAT compatibility package
+
+The Relay-managed tool modules moved from `xr-ai-nat` to the
+dedicated `xr-ai-tools` package. Live vision is split into independent finite
+and streaming tool modules. `xr-ai-nat` now remains only as the NeMo Agent
+Toolkit compatibility surface during migration.
+
+### 2026-08-12 — Agentic vision is finite; streaming vision is asynchronous
 
 Relay's managed tool API accepts completed JSON results; it does not define a
 streaming tool execution contract. XR AI does not reproduce Relay's guardrail
 and intercept pipeline around an async generator. `LiveVisionTool` therefore
 returns one complete observation through `Tool.execute()` for normal agentic
-planning. Its shared `LiveVisionResponder` is reserved for direct voice, where
-an application-owned stream under an Agent scope sends the provider call
-through Relay's managed streaming LLM API. This keeps streaming out of ordinary
-tool flows without delaying direct speech.
+planning. `StreamingVisionTool` is a separate, transport-independent
+`AsyncTool` that yields typed chunks while its provider call uses Relay's
+managed streaming LLM API. Applications may adapt that stream to voice or any
+other consumer; the tool itself has no voice behavior.
 
 Live camera frames remain provider input but are replaced in emitted Relay
 events by a scope-local sanitizer. Relay request-intercept headers cross the

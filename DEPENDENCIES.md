@@ -119,23 +119,25 @@ xr-ai-models  (agent-sdk/xr-ai-models/)
     own httpx wrappers. Profiles may separate adapter, endpoint, and deployment
     metadata while the existing flat YAML schema remains valid.
 
-xr-ai-nat  (agent-sdk/xr-ai-nat/)
+xr-ai-tools  (agent-sdk/xr-ai-tools/)
     └── nemo-relay >=0.7.2,<0.8
     └── pydantic >=2.10
     └── [relay] xr-ai-models [editable: ../xr-ai-models]
     └── [live-vision] numpy >=1.24, Pillow >=10.0, xr-ai-hub-client [editable: ../xr-ai-hub-client], xr-ai-models [editable: ../xr-ai-models]
-    └── [agents] nvidia-nat-core ==1.8.0, nvidia-nat-langchain ==1.8.0, xr-ai-models [editable: ../xr-ai-models]
-    └── [mcp] nvidia-nat-core ==1.8.0, fastmcp >=3.4,<4
-    └── [services] nvidia-nat-core ==1.8.0, msgpack >=1.0, pyzmq >=27.0
-    └── [vision] nvidia-nat-core ==1.8.0, httpx >=0.27, numpy >=1.24, Pillow >=10.0, xr-ai-hub-client [editable: ../xr-ai-hub-client], xr-ai-models [editable: ../xr-ai-models]
-    └── [voice] nvidia-nat-core ==1.8.0, xr-ai-voice [editable: ../xr-ai-voice]
-    The base package is the toolkit-independent native tools layer: Pydantic
-    request and response models, Relay-managed execution, the generic
-    ``AgentRunner`` protocol, and a bounded default tool loop over
-    `xr-ai-models`. The ``[relay]`` and
-    ``[live-vision]`` extras add model-backed tools without selecting NeMo Agent
-    Toolkit. The existing function groups remain behind legacy compatibility
-    extras while they migrate. The ``xr_spatial_math`` function group accepts
+    Toolkit-independent native tools: Pydantic request and response models,
+    Relay-managed finite and async execution, model tool-call workflow helpers,
+    and participant-scoped live vision.
+
+xr-ai-nat  (agent-sdk/xr-ai-nat/)
+    └── nvidia-nat-core ==1.8.0
+    └── pydantic >=2.10
+    └── [agents] nvidia-nat-langchain ==1.8.0, xr-ai-models [editable: ../xr-ai-models]
+    └── [mcp] fastmcp >=3.4,<4
+    └── [services] msgpack >=1.0, pyzmq >=27.0
+    └── [vision] httpx >=0.27, numpy >=1.24, Pillow >=10.0, xr-ai-hub-client [editable: ../xr-ai-hub-client], xr-ai-models [editable: ../xr-ai-models]
+    └── [voice] xr-ai-voice [editable: ../xr-ai-voice]
+    Typed, in-process NeMo Agent Toolkit functions retained while their
+    concrete capabilities migrate. The ``xr_spatial_math`` function group accepts
     explicit coordinate frames and
     performs deterministic spatial calculations without OpenXR, model, or MCP
     dependencies. ``xr_text_memory`` owns persistent per-source JSONL text
@@ -153,9 +155,8 @@ xr-ai-nat  (agent-sdk/xr-ai-nat/)
     ``xr_vision_tools`` exposes ``look_at_current_frame`` and
     ``look_at_past_frame`` over the always-on live-frame source, acquiring the
     frame itself and calling an injected xr-ai-models VLM; recorded lookups
-    resolve through the ``xr_video_memory`` group. A separate
-    ``xr_streaming_vision`` function composes current-frame acquisition with
-    complete or streaming VLM invocation. ``xr_tracking`` calls
+    resolve through the ``xr_video_memory`` group. The replaced NAT
+    streaming function has moved to ``xr-ai-tools``. ``xr_tracking`` calls
     the typed OpenXR service and returns a complete user coordinate frame.
     ``xr_video_memory`` calls the typed video-memory service for recorded-video
     discovery, queries, and frame extraction. ``xr_rag`` calls the typed RAG
@@ -334,7 +335,8 @@ vec-mcp-server  (agent-mcp-servers/vec-mcp/)
 xr-ai-tests  (tests/)
     └── xr-ai-hub-client             [editable: ../agent-sdk/xr-ai-hub-client]
     └── xr-ai-models            [editable: ../agent-sdk/xr-ai-models]
-    └── xr-ai-nat[agents,relay,services,vision] [editable: ../agent-sdk/xr-ai-nat]
+    └── xr-ai-nat[agents,services,vision] [editable: ../agent-sdk/xr-ai-nat]
+    └── xr-ai-tools[live-vision] [editable: ../agent-sdk/xr-ai-tools]
     └── xr-rag-service [editable: ../services/rag-service]
     └── xr-ai-pipecat           [editable: ../agent-sdk/xr-ai-pipecat]
     └── xr-ai-voice             [editable: ../agent-sdk/xr-ai-voice]
@@ -554,14 +556,13 @@ the latest video frame via streaming VLM and replies with both
 | Sub-project | Package | Internal deps | External deps |
 |---|---|---|---|
 | Orchestrator | `simple-vlm-example` | `xr-ai-launcher` | — |
-| Worker | `simple-vlm-example-worker` | `xr-ai-hub-client [editable]`, `xr-ai-logging [editable]`, `xr-ai-models [editable]`, `xr-ai-nat[relay,live-vision] [editable]`, `xr-ai-voice [editable]`, `xr-ai-voicegate [editable]` | loguru >=0.7, pyyaml >=6.0 (`xr-ai-voice` pulls in VAD, pipecat-ai, numpy, and scipy; `xr-ai-nat[live-vision]` pulls in numpy and Pillow) |
+| Worker | `simple-vlm-example-worker` | `xr-ai-hub-client [editable]`, `xr-ai-logging [editable]`, `xr-ai-models [editable]`, `xr-ai-tools[live-vision] [editable]`, `xr-ai-voice [editable]`, `xr-ai-voicegate [editable]` | loguru >=0.7, pyyaml >=6.0 (`xr-ai-voice` pulls in VAD, pipecat-ai, numpy, and scipy; `xr-ai-tools[live-vision]` pulls in numpy and Pillow) |
 
-The packaged worker constructs the finite `LiveVisionTool` used by agentic
-flows, then maps its separate direct-voice `LiveVisionResponder` to
-`VoiceSession`. They share current-frame acquisition through
-`xr-ai-hub-client`; only the direct voice response uses NeMo Relay's managed
-streaming LLM path under an Agent scope. Camera bytes are redacted from Relay
-telemetry while the provider receives the original frame.
+The packaged worker constructs a transport-independent `StreamingVisionTool`
+and adapts its typed async chunks to `VoiceSession` locally. The tool owns
+current-frame acquisition through `xr-ai-hub-client`, has no voice dependency,
+and uses NeMo Relay's managed streaming LLM path. Camera bytes are redacted from
+Relay telemetry while the provider receives the original frame.
 `VoiceSession` owns readiness, hub transport, signals, the
 private Pipecat pipeline, and cleanup; `TextMessageInput` routes `"ping"` and
 ad-hoc text through the same participant-aware path as speech. Voice-gate
