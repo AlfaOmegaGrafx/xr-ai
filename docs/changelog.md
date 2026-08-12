@@ -9,6 +9,22 @@ Significant decisions, in reverse-chronological order. Update this whenever a
 non-trivial architectural or design decision is made so the rationale is
 preserved and not re-litigated.
 
+### 2026-08-12 — Agentic vision is finite; direct voice may stream
+
+Relay's managed tool API accepts completed JSON results; it does not define a
+streaming tool execution contract. XR AI does not reproduce Relay's guardrail
+and intercept pipeline around an async generator. `LiveVisionTool` therefore
+returns one complete observation through `Tool.execute()` for normal agentic
+planning. Its shared `LiveVisionResponder` is reserved for direct voice, where
+an application-owned stream under an Agent scope sends the provider call
+through Relay's managed streaming LLM API. This keeps streaming out of ordinary
+tool flows without delaying direct speech.
+
+Live camera frames remain provider input but are replaced in emitted Relay
+events by a scope-local sanitizer. Relay request-intercept headers cross the
+`VLMService` boundary as controlled per-call headers; model-profile credentials
+remain non-overridable.
+
 ### 2026-08-11 — Native tools own agent composition; Relay owns their execution
 
 NeMo Agent Toolkit is being retired from XR AI in focused migrations rather
@@ -16,11 +32,11 @@ than a framework-wide swap. `xr-ai-nat` is the public, toolkit-independent
 native tools layer: typed tools, an `AgentRunner` async-turn protocol, and a
 bounded default tool loop. A model is a private implementation dependency of a
 model-backed tool or agent, reached only through `xr-ai-models`; voice, text,
-and background triggers invoke registered tools rather than model clients. NeMo
-Relay runs the tool and model lifecycles, supplying middleware, guardrails, and
-telemetry. `as_agent_tool` lets a custom or future Fabric-backed runner use the
-same registered-tool path without making a framework part of the public trigger
-boundary.
+and background triggers invoke native tools or responders rather than model
+clients. NeMo Relay runs finite tool and model lifecycles, supplying middleware,
+guardrails, and telemetry. `as_agent_tool` lets a custom or future Fabric-backed
+runner use the same registered-tool path without making a framework part of the
+public trigger boundary.
 
 The existing NeMo Agent Toolkit function groups remain behind legacy extras
 while they migrate. Relay does not own XR application routing, participant

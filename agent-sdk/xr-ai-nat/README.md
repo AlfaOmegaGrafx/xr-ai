@@ -60,6 +60,22 @@ custom, Fabric-backed, or framework-backed runner through the same registered
 invocation path. Relay observes model calls inside a tool-backed runner; the
 application never calls an LLM client as a separate control path.
 
+## Live vision tool and direct voice responder
+
+Install `xr-ai-nat[relay,live-vision]` for `LiveVisionTool`. The finite
+`look_at_current_frame` tool acquires a participant's current frame and returns
+one complete `VisionResponse` for agentic planning. `LiveVisionResponder`
+shares that tool's frame source and streams only the direct voice path. Both
+call an injected `VLMService` through Relay's matching managed LLM boundary,
+forward controlled Relay headers, and redact the inline camera frame from
+events while the provider receives the original. `LiveVisionTool.release()`
+clears participant frame state.
+
+Relay's managed tool API accepts completed JSON results, while its managed LLM
+API supports streaming. Agentic vision therefore uses `Tool.execute()` and a
+complete result; direct voice remains an application-owned response stream
+with Relay managing the nested model call.
+
 ## Legacy NAT compatibility
 
 ## Shared value models and the service boundary
