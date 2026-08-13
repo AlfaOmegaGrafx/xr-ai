@@ -11,9 +11,11 @@ import time
 import uuid
 from builtins import BaseExceptionGroup
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias, TypeVar, cast, get_type_hints
 
+import nemo_relay
 from pydantic import BaseModel
 
 from .agent import Agent
@@ -33,7 +35,6 @@ class RuntimeClosedError(RuntimeError):
 class _AgentState:
     name: str
     deliveries: set[asyncio.Task[None]] = field(default_factory=set)
-
 
 class RuntimeContext:
     """Runtime operations available during a subscription delivery."""
@@ -69,7 +70,7 @@ class RuntimeContext:
         *,
         participant_id: str | None = None,
     ) -> None:
-        """Publish an event while preserving current trace context."""
+        """Publish an event, preserving delivery scope when one exists."""
 
         await self._runtime._publish(
             topic,
@@ -80,7 +81,7 @@ class RuntimeContext:
             parent_message_id=self._metadata.message_id,
         )
 
-    def _resolve_participant(self, participant_id: str | None) -> str:
+    def _resolve_participant(self, participant_id: str | None) -> str | None:
         if participant_id is not None:
             return participant_id
         return self._metadata.participant_id
@@ -146,7 +147,7 @@ class AgentRuntime:
         topic: Topic[MessageT],
         message: MessageT | dict[str, Any],
         *,
-        participant_id: str,
+        participant_id: str | None = None,
         source: str = "application",
     ) -> None:
         """Validate and deliver one event to every topic subscriber."""
@@ -185,7 +186,7 @@ class AgentRuntime:
         topic: Topic[MessageT],
         message: MessageT | dict[str, Any],
         *,
-        participant_id: str,
+        participant_id: str | None,
         source: str,
         correlation_id: str | None = None,
         parent_message_id: str | None = None,
@@ -199,34 +200,68 @@ class AgentRuntime:
             correlation_id=correlation_id,
             parent_message_id=parent_message_id,
         )
-        deliveries: list[asyncio.Task[None]] = []
-        for state, method in tuple(self._subscribers.get(topic.name, ())):
-            task = asyncio.create_task(
-                self._deliver(
-                    state,
-                    method,
-                    value.model_copy(deep=True),
-                    metadata,
-                ),
-                name=f"agent:{state.name}:subscription:{topic.name}",
+        traced = topic.telemetry == "full"
+        publication_scope = (
+            nemo_relay.scope.scope(
+                f"publish:{topic.name}",
+                nemo_relay.ScopeType.Function,
+                input=value.model_dump(mode="json"),
+                metadata=self._relay_metadata(metadata, topic=topic.name),
             )
-            state.deliveries.add(task)
-            task.add_done_callback(state.deliveries.discard)
-            deliveries.append(task)
-        if deliveries:
-            results = await asyncio.gather(*deliveries, return_exceptions=True)
-            errors = [result for result in results if isinstance(result, BaseException)]
-            if errors:
-                raise BaseExceptionGroup("errors during event publication", errors)
+            if traced
+            else nullcontext()
+        )
+        with publication_scope:
+            deliveries: list[asyncio.Task[None]] = []
+            for state, method in tuple(self._subscribers.get(topic.name, ())):
+                task = asyncio.create_task(
+                    self._deliver(
+                        state,
+                        method,
+                        topic.name,
+                        value.model_copy(deep=True),
+                        metadata,
+                        traced=traced,
+                    ),
+                    name=f"agent:{state.name}:subscription:{topic.name}",
+                    context=nemo_relay.fork_asyncio_context(),
+                )
+                state.deliveries.add(task)
+                task.add_done_callback(state.deliveries.discard)
+                deliveries.append(task)
+            if deliveries:
+                results = await asyncio.gather(*deliveries, return_exceptions=True)
+                errors = [
+                    result for result in results if isinstance(result, BaseException)
+                ]
+                if errors:
+                    raise BaseExceptionGroup("errors during event publication", errors)
 
     async def _deliver(
         self,
         state: _AgentState,
         method: BoundSubscriber,
+        topic_name: str,
         message: BaseModel,
         metadata: MessageMetadata,
+        *,
+        traced: bool,
     ) -> None:
-        await method(message, RuntimeContext(self, state.name, metadata))
+        if not traced:
+            await method(message, RuntimeContext(self, state.name, metadata))
+            return
+        with nemo_relay.scope.scope(
+            f"agent:{state.name}",
+            nemo_relay.ScopeType.Agent,
+            input=message.model_dump(mode="json"),
+            metadata=self._relay_metadata(
+                metadata,
+                topic=topic_name,
+                agent=state.name,
+                subscriber=method.__name__,
+            ),
+        ):
+            await method(message, RuntimeContext(self, state.name, metadata))
 
     def _discover_subscriptions(
         self,
@@ -271,12 +306,12 @@ class AgentRuntime:
     @staticmethod
     def _metadata(
         *,
-        participant_id: str,
+        participant_id: str | None,
         source: str,
         correlation_id: str | None,
         parent_message_id: str | None,
     ) -> MessageMetadata:
-        if not participant_id.strip():
+        if participant_id is not None and not participant_id.strip():
             raise ValueError("participant_id must not be empty")
         if not source.strip():
             raise ValueError("message source must not be empty")
@@ -289,6 +324,26 @@ class AgentRuntime:
             parent_message_id=parent_message_id,
             timestamp_us=time.time_ns() // 1_000,
         )
+
+    @staticmethod
+    def _relay_metadata(
+        metadata: MessageMetadata,
+        *,
+        topic: str,
+        agent: str | None = None,
+        subscriber: str | None = None,
+    ) -> dict[str, str | int | None]:
+        return {
+            "topic": topic,
+            "agent": agent,
+            "subscriber": subscriber,
+            "message_id": metadata.message_id,
+            "correlation_id": metadata.correlation_id,
+            "parent_message_id": metadata.parent_message_id,
+            "participant_id": metadata.participant_id,
+            "source": metadata.source,
+            "timestamp_us": metadata.timestamp_us,
+        }
 
 
 __all__ = [
