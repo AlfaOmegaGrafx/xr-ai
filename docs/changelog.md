@@ -9,6 +9,69 @@ Significant decisions, in reverse-chronological order. Update this whenever a
 non-trivial architectural or design decision is made so the rationale is
 preserved and not re-litigated.
 
+### 2026-08-12 — NeMo Agent Toolkit compatibility is retired
+
+All surviving capabilities now use native `xr-ai-tools` contracts. OpenXR,
+video-memory, and RAG services share the toolkit-independent correlated
+msgpack/ZMQ protocol; RAG, tracking, video memory, vision, spatial math, and
+text/conversation memory expose native typed tools. The `xr-ai-nat` package,
+NAT/LangChain provider bridge, generic NAT-to-MCP adapter, migration guide, and
+NAT-only tests are removed. Restored native tests cover RPC correlation and
+remote errors, service/tool interoperability, text-memory path safety, spatial
+fallbacks, and XR scene lifecycle/resync behavior.
+
+### 2026-08-12 — Voice lifecycle events do not block media processing
+
+`VoiceAgent` schedules participant-departure and interruption publication on
+tasks it owns and cancels during shutdown. Application cleanup therefore runs
+through typed runtime topics without blocking Pipecat's shared frame processor.
+The xr-render agent distinguishes producer supersession from consumer abort:
+supersession completes the prior voice stream before starting its replacement,
+while interruption and departure explicitly close the scene generator without
+publishing a terminator to a voice stream the consumer already evicted.
+
+The render worker's LLM warmup is part of its readiness probe. Health must pass
+before warmup runs, and a failed warmup leaves readiness pending for retry.
+Render-owned model clients close only after active render turns stop.
+
+### 2026-08-12 — Native tools replace the in-tree MCP compatibility servers
+
+The OXR, render, transcript, vector, video, and VLM MCP server packages are no
+longer shipped. Native agents invoke the corresponding `xr-ai-tools` or
+sample-local tools directly, while reusable process boundaries remain typed
+msgpack/ZMQ services. The generic `xr-ai-nat[mcp]` adapter remains available to
+applications that must expose an explicit native tool list to an external
+MCP-only consumer.
+
+The xr-render worker now follows the named-package convention. Its resident
+runtime agent lives in `agent.py`; XR startup and readiness live in
+`lifecycle.py`; model orchestration, tool composition, and model-I/O helpers
+live in `scene_loop.py`, `tools.py`, and `model_io.py`, respectively. The
+sample-specific tracking-plus-spatial tool group lives in `spatial_tools.py`.
+
+### 2026-08-12 — xr-render-demo uses native Relay-managed tools
+
+The render worker and its sample-local scene process no longer depend on
+`xr-ai-nat`. `NativeCapabilities` composes scene, tracking, spatial,
+video-memory, current/historical vision, and text-memory `Tool` instances;
+model schemas use `tool_definitions()`, and model-selected execution uses
+`handle_tool_call()`. The established model-visible names, schemas, result
+shapes, prompt, routing, scene protocol, and voice behavior remain unchanged.
+Reusable typed service RPC and capability tools live in `xr-ai-tools`, while
+the render scene tools remain sample-local.
+
+### 2026-08-12 — xr-render-demo uses the shared agent runtime
+
+The xr-render-demo worker no longer subclasses `BrainProcessor` or imports
+`xr-ai-pipecat`. The shared `VoiceAgent` publishes `UserQuery` to the
+sample-owned `xr-render.user-query` topic; other input pathways can publish the
+same message. A resident `RenderAgent` owns runtime-tracked participant turns
+and publishes correlated `voice.output` chunks back to that same voice agent
+for TTS. XR launch failures use a sample-local notice topic, while voice
+interruption callbacks address the render agent to cancel participant or global
+work. Pipecat remains private inside `xr-ai-voice` rather than part of the
+sample's application API.
+
 ### 2026-08-12 — Runtime and agent telemetry uses Relay's local event stream
 
 `AgentRuntime` records every typed publication as a Relay function scope and

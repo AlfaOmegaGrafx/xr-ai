@@ -10,8 +10,8 @@ history. XR Media Hub writes the H.264 chunks; this process reads those chunks,
 extracts PNG frames with NVDEC, and writes requested clips or frames to
 `out_dir`. It does not subscribe to live hub frames.
 
-Applications expose the service through
-`xr_ai_nat.functions.video_memory.VideoMemoryFunctionsConfig`. The native group
+Applications construct `xr_ai_tools.video_memory.VideoMemoryTools` with the
+private service endpoint. The native tool group
 contains four recorded-history operations:
 
 - `list_recorded_participants` returns exact participant identities.
@@ -24,8 +24,7 @@ Every `*_us` field is a Unix-epoch timestamp in microseconds. Keep the
 model-facing offset coarse: use whole `second_ago` values for temporal
 reasoning and use the returned `timestamp_us` to inspect the exact selected
 frame. A current camera frame is not recorded history; obtain it through
-`xr_ai_hub.LiveFrameSource` or, while it remains supported, Video MCP's live
-compatibility tools.
+`xr_ai_hub.LiveFrameSource` in the process that owns the hub connection.
 
 ```yaml
 endpoint: tcp://0.0.0.0:8310

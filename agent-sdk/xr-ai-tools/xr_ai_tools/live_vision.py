@@ -24,6 +24,7 @@ from ._vision import (
     register_frame_sanitizer,
     relay_request,
     response_text,
+    visible_text,
     vision_inputs,
 )
 from .tools import Tool
@@ -42,6 +43,7 @@ class LiveVisionTool(Tool[VisionRequest, VisionResponse]):
         system_prompt: str = "",
         frame_max_age_s: float = 2.0,
         frame_timeout_s: float = 5.0,
+        manage_status: bool = True,
     ) -> None:
         if frame_max_age_s <= 0.0:
             raise ValueError("frame_max_age_s must be positive")
@@ -50,6 +52,7 @@ class LiveVisionTool(Tool[VisionRequest, VisionResponse]):
         self.endpoint = endpoint
         self.vlm = vlm
         self.system_prompt = system_prompt
+        self.manage_status = manage_status
         self.frames = LiveFrameSource(
             endpoint,
             max_age_s=frame_max_age_s,
@@ -73,9 +76,10 @@ class LiveVisionTool(Tool[VisionRequest, VisionResponse]):
         try:
             image_url = await self._current_image(request.participant_id)
         except FrameUnavailable as exc:
-            return VisionResponse(text=str(exc))
+            return VisionResponse(text=str(exc), available=False)
 
-        await self.endpoint.set_status("processing", request.participant_id)
+        if self.manage_status:
+            await self.endpoint.set_status("processing", request.participant_id)
         try:
             register_frame_sanitizer()
             response = await nemo_relay.llm.execute(
@@ -86,12 +90,22 @@ class LiveVisionTool(Tool[VisionRequest, VisionResponse]):
                 codec=OpenAIChatCodec(),
                 response_codec=OpenAIChatCodec(),
             )
-            return VisionResponse(text=response_text(response))
+            text = visible_text(response_text(response))
+            if not text:
+                return VisionResponse(
+                    text="The current camera image did not produce an answer.",
+                    available=False,
+                )
+            return VisionResponse(text=text)
         except Exception:
             _LOGGER.exception("Live VLM request failed")
-            return VisionResponse(text="VLM server unavailable — please retry.")
+            return VisionResponse(
+                text="VLM server unavailable — please retry.",
+                available=False,
+            )
         finally:
-            await self.endpoint.set_status("idle", request.participant_id)
+            if self.manage_status:
+                await self.endpoint.set_status("idle", request.participant_id)
 
     async def _current_image(self, participant_id: str) -> str:
         frame = await self.frames.get(participant_id)

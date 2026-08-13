@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import runpy
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,12 +29,6 @@ sys.path.insert(0, str(_WORKER_DIR))
 
 from _stub_openai import StubOpenAI
 
-from pipecat.frames.frames import EndFrame, Frame, TextFrame
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineWorker
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.workers.runner import WorkerRunner
-
 from xr_ai_hub import DataMessage
 from xr_ai_models import (
     ChatMessage,
@@ -41,10 +36,9 @@ from xr_ai_models import (
     ToolDef,
     load_models_config,
 )
-from nat.builder.workflow_builder import WorkflowBuilder
-from nat.plugin_api import FunctionGroupRef
-from xr_ai_nat.functions.video_memory import VideoMemoryFunctionsConfig
-from xr_ai_nat.functions.vision import VisionToolsConfig
+from xr_ai_tools import ToolSet
+from xr_ai_tools.tracking import TrackingTools
+from xr_ai_tools.tool_calling import tool_definitions
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -112,7 +106,7 @@ def test_models_yaml_loads() -> None:
 def test_worker_config_idle_timeout_disabled_by_default() -> None:
     """The shipped worker YAML ships idle_timeout_secs: 0, which the loader
     maps to None (disabled) so a quiet session is never auto-cancelled."""
-    from config import load_config
+    from xr_render_demo_worker.config import load_config
 
     worker_yaml = (
         Path(__file__).resolve().parent.parent
@@ -124,12 +118,22 @@ def test_worker_config_idle_timeout_disabled_by_default() -> None:
 
 def test_worker_config_idle_timeout_opt_in(tmp_path) -> None:
     """A positive idle_timeout_secs in the YAML is parsed to a float."""
-    from config import load_config
+    from xr_render_demo_worker.config import load_config
 
     y = tmp_path / "w.yaml"
     y.write_text("idle_timeout_secs: 300\n")
     cfg = load_config(y)
     assert cfg.idle_timeout_secs == 300.0
+
+
+def test_eval_harness_imports_public_perception_contracts() -> None:
+    eval_path = (Path(__file__).resolve().parent.parent / "agent-samples"
+                 / "xr-render-demo" / "eval" / "eval.py")
+    namespace = runpy.run_path(str(eval_path), run_name="xr_render_eval_contract")
+
+    assert namespace["LIVE_PERCEPTION_TOOL"] == _loop.LIVE_PERCEPTION_TOOL
+    assert namespace["PAST_PERCEPTION_TOOL"] == _loop.PAST_PERCEPTION_TOOL
+    assert namespace["PERCEPTION_TOOL_DEFS"] == _loop.PERCEPTION_TOOL_DEFS
 
 
 # ── quick-ack wire golden ─────────────────────────────────────────────────────
@@ -383,36 +387,21 @@ def test_tool_def_to_openai_wire_shape() -> None:
     }
 
 
-# ── XR-launch-failure notice delivery (yield → TTS + _send → panel) ────────────
+# ── XR-launch-failure notice delivery (runtime voice + panel) ─────────────────
 #
-# When start_xr / the LOVR-spawn poll fails, RenderDemoAgent calls
-# RenderSceneProcessor.enqueue_notice(pid, msg). The notice must be delivered
-# with the SAME shape as a normal final answer: spoken (yielded → TextFrame at
-# the TTS-facing sink) AND on the agent.response data topic (panel). The notice
-# path runs no LLM/MCP, so the brain is built with None clients and the real
-# prompt files — only the transport is faked to capture _send.
+# When start_xr / the LOVR-spawn poll fails, XRSessionLifecycle publishes a
+# notice. The scene loop must deliver it with
+# the same shape as a normal final answer: a yielded voice chunk and an
+# agent.response data message for the panel.
 
-_PROMPTS_DIR = _WORKER_DIR / "prompts"
+_PROMPTS_DIR = _WORKER_DIR / "xr_render_demo_worker" / "prompts"
 _SYSTEM_PROMPT = _PROMPTS_DIR / "system.txt"
 
 _LAUNCH_FAIL_MSG = "I couldn't start the XR session — try Launch XR again."
 
 
-class _CaptureSink(FrameProcessor):
-    """Tail processor — collects every downstream frame it sees."""
-
-    def __init__(self) -> None:
-        super().__init__(enable_direct_mode=True)
-        self.frames: list[Frame] = []
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        await super().process_frame(frame, direction)
-        self.frames.append(frame)
-        await self.push_frame(frame, direction)
-
-
 class _CaptureTransport:
-    """XRMediaHubTransport double — records send_return_data and owns the
+    """HubVoiceTransport double — records send_return_data and owns the
     target participant. Only the surface the notice path touches."""
 
     def __init__(self) -> None:
@@ -426,72 +415,35 @@ class _CaptureTransport:
         self.sent.append(msg)
 
 
-class _UnusedToolbox:
-    async def invoke(self, name: str, arguments: dict):
-        raise AssertionError(f"unexpected native tool invocation: {name} {arguments}")
-
-
 def _make_brain(transport: _CaptureTransport, llm=None):
-    """Build a real RenderSceneProcessor whose service clients are unused.
+    """Build a real SceneModelLoop whose service clients are unused.
 
-    The notice path (enqueue_notice → handle_query short-circuit →
-    _emit_notice) never dereferences them. The constructor eagerly reads
+    The notice path never dereferences them. The constructor eagerly reads
     the real prompt files, so point at the bundled prompts/ directory.
     Pass ``llm`` to exercise the real _quick_ack parse paths against a stub.
     """
-    return _proc.RenderSceneProcessor(
+    return _loop.SceneModelLoop(
         transport   = transport,
         cfg         = None,
-        toolbox     = _UnusedToolbox(),
+        tools       = ToolSet(()),
         release_vision = lambda _pid: None,
         text_memory = None,
         prompt_path = _SYSTEM_PROMPT,
-        tools       = [],
+        model_tools = [],
         llm         = llm,
         agent_llm   = None,
     )
 
 
-async def _drive_notice(brain, transport: _CaptureTransport,
-                        pid: str, msg: str) -> _CaptureSink:
-    """Run brain → sink in a PipelineWorker and call enqueue_notice once the
-    pipeline has started, then drain with EndFrame. Returns the sink."""
-    sink = _CaptureSink()
-    pipeline = Pipeline([brain, sink])
-    worker = PipelineWorker(
-        pipeline, cancel_on_idle_timeout=False, enable_rtvi=False,
-    )
-    runner = WorkerRunner()
-    await runner.add_workers(worker)
-
-    async def drive() -> None:
-        # Let StartFrame propagate before injecting the notice.
-        await asyncio.sleep(0.05)
-        await brain.enqueue_notice(pid, msg)
-        await asyncio.sleep(0.15)
-        await worker.queue_frame(EndFrame())
-
-    await asyncio.gather(runner.run(), drive())
-    return sink
-
-
 async def test_launch_failure_notice_spoken_and_paneled() -> None:
-    """enqueue_notice delivers BOTH: a yielded TextFrame (→ TTS) and an
-    agent.response data message (→ panel), routed to the originating pid.
-
-    Because agent_llm is None, if the query had wrongly fallen through to
-    the agentic loop it would have returned "Done." — so seeing the exact
-    notice string at the sink proves the LLM loop was skipped.
-    """
+    """A lifecycle notice yields voice and sends panel data to the same pid."""
     transport = _CaptureTransport()
     transport.set_target_participant("pid-1")
     brain = _make_brain(transport)
 
-    sink = await _drive_notice(brain, transport, "pid-1", _LAUNCH_FAIL_MSG)
+    spoken = [text async for text in brain.handle_notice("pid-1", _LAUNCH_FAIL_MSG)]
 
-    # Spoken: exactly one TextFrame carrying the notice verbatim.
-    texts = [f.text for f in sink.frames if isinstance(f, TextFrame)]
-    assert texts == [_LAUNCH_FAIL_MSG]
+    assert spoken == [_LAUNCH_FAIL_MSG]
 
     # Panel: exactly one agent.response send to the originating pid.
     assert len(transport.sent) == 1
@@ -499,32 +451,6 @@ async def test_launch_failure_notice_spoken_and_paneled() -> None:
     assert sent.topic == "agent.response"
     assert sent.participant_id == "pid-1"
     assert sent.data.decode() == _LAUNCH_FAIL_MSG
-    # No brain.close() — that closes the (None) LLM clients; the notice
-    # path never opened them.
-
-
-async def test_pending_notice_not_consumed_by_real_query() -> None:
-    """Exact-text match: a real query that interleaves before the notice
-    task runs must NOT be mistaken for the pending notice. The pending
-    entry survives a non-matching handle_query; the matching one drains it.
-
-    handle_query returns the generator without iterating, so no LLM fires —
-    we only assert on _pending_notices bookkeeping here.
-    """
-    transport = _CaptureTransport()
-    transport.set_target_participant("pid-1")
-    brain = _make_brain(transport)
-
-    # Register a pending notice the way enqueue_notice does, without spawning.
-    brain._pending_notices.setdefault("pid-1", []).append(_LAUNCH_FAIL_MSG)
-
-    # A real, different query for the same pid must not consume the notice.
-    await brain.handle_query("pid-1", "move the cube left", False)
-    assert brain._pending_notices.get("pid-1") == [_LAUNCH_FAIL_MSG]
-
-    # The matching text drains it.
-    await brain.handle_query("pid-1", _LAUNCH_FAIL_MSG, False)
-    assert "pid-1" not in brain._pending_notices
 
 
 async def test_quick_ack_spoken_on_non_thinking_turn() -> None:
@@ -532,13 +458,13 @@ async def test_quick_ack_spoken_on_non_thinking_turn() -> None:
     including a non-thinking one, so a tool-using turn is never silent until
     the final reply. Pre-change the ack was spoken only when needs_thinking.
 
-    _quick_ack and _agentic_loop are stubbed so no LLM/MCP client is touched.
+    _quick_ack and _agentic_loop are stubbed so no LLM or tool execution is touched.
     """
     transport = _CaptureTransport()
     transport.set_target_participant("pid-1")
     brain = _make_brain(transport)
 
-    async def _fake_quick_ack(_text):
+    async def _fake_quick_ack(_pid, _text):
         return ("On it.", False)  # ack present, needs_thinking = False
 
     async def _fake_loop(*_a, **_k):
@@ -547,7 +473,7 @@ async def test_quick_ack_spoken_on_non_thinking_turn() -> None:
     brain._quick_ack = _fake_quick_ack      # noqa: SLF001
     brain._agentic_loop = _fake_loop        # noqa: SLF001
 
-    gen = await brain.handle_query("pid-1", "place a cube", False)
+    gen = await brain.handle_query("pid-1", "place a cube")
     spoken = [s async for s in gen]
 
     # Ack is spoken first (so the turn isn't silent), then the final reply.
@@ -562,7 +488,7 @@ def test_tool_result_json_is_sanitized() -> None:
     """A final response that is nothing but a JSON object (e.g. an echoed
     tool result) must be flagged so it never reaches TTS; prose that merely
     contains JSON passes."""
-    from tooling import looks_like_leaked_tool_call
+    from xr_render_demo_worker.model_io import looks_like_leaked_tool_call
 
     assert looks_like_leaked_tool_call('{"id": "box-1", "ok": true, "reason": null}')
     assert looks_like_leaked_tool_call('[{"id": "box-1", "ok": true}]')
@@ -575,7 +501,7 @@ async def test_quick_ack_parses_wellformed_json() -> None:
     stub = StubOpenAI()
     stub.set_chat_message(content='{"ack": "On it", "think": true}')
     brain = _make_brain(_CaptureTransport(), llm=_make_spec_llm(stub, "llm"))
-    assert await brain._quick_ack("move the cube") == ("On it", True)  # noqa: SLF001
+    assert await brain._quick_ack("pid-1", "move the cube") == ("On it", True)  # noqa: SLF001
 
 
 async def test_quick_ack_string_think_is_not_truthy() -> None:
@@ -583,7 +509,7 @@ async def test_quick_ack_string_think_is_not_truthy() -> None:
     stub = StubOpenAI()
     stub.set_chat_message(content='{"ack": "On it", "think": "false"}')
     brain = _make_brain(_CaptureTransport(), llm=_make_spec_llm(stub, "llm"))
-    assert await brain._quick_ack("move the cube") == ("On it", False)  # noqa: SLF001
+    assert await brain._quick_ack("pid-1", "move the cube") == ("On it", False)  # noqa: SLF001
 
 
 async def test_quick_ack_truncated_json_not_spoken() -> None:
@@ -592,7 +518,7 @@ async def test_quick_ack_truncated_json_not_spoken() -> None:
     stub = StubOpenAI()
     stub.set_chat_message(content='{"ack": "Let me ta')
     brain = _make_brain(_CaptureTransport(), llm=_make_spec_llm(stub, "llm"))
-    assert await brain._quick_ack("what am I holding") == ("", False)  # noqa: SLF001
+    assert await brain._quick_ack("pid-1", "what am I holding") == ("", False)  # noqa: SLF001
 
 
 async def test_quick_ack_bare_prose_fallback() -> None:
@@ -600,7 +526,7 @@ async def test_quick_ack_bare_prose_fallback() -> None:
     stub = StubOpenAI()
     stub.set_chat_message(content="On it")
     brain = _make_brain(_CaptureTransport(), llm=_make_spec_llm(stub, "llm"))
-    assert await brain._quick_ack("add a sphere") == ("On it", False)  # noqa: SLF001
+    assert await brain._quick_ack("pid-1", "add a sphere") == ("On it", False)  # noqa: SLF001
 
 
 async def test_quick_ack_transport_error_falls_back_silent_fast() -> None:
@@ -611,7 +537,7 @@ async def test_quick_ack_transport_error_falls_back_silent_fast() -> None:
             raise TimeoutError
 
     brain = _make_brain(_CaptureTransport(), llm=_BoomLLM())
-    assert await brain._quick_ack("move it up") == ("", False)  # noqa: SLF001
+    assert await brain._quick_ack("pid-1", "move it up") == ("", False)  # noqa: SLF001
 
 
 async def test_already_punctuated_ack_not_doubled() -> None:
@@ -620,7 +546,7 @@ async def test_already_punctuated_ack_not_doubled() -> None:
     transport.set_target_participant("pid-1")
     brain = _make_brain(transport)
 
-    async def _fake_quick_ack(_text):
+    async def _fake_quick_ack(_pid, _text):
         return ("On it!", False)
 
     async def _fake_loop(*_a, **_k):
@@ -629,7 +555,7 @@ async def test_already_punctuated_ack_not_doubled() -> None:
     brain._quick_ack = _fake_quick_ack      # noqa: SLF001
     brain._agentic_loop = _fake_loop        # noqa: SLF001
 
-    gen = await brain.handle_query("pid-1", "add a cube", False)
+    gen = await brain.handle_query("pid-1", "add a cube")
     spoken = [s async for s in gen]
     assert spoken == ["On it!", "Done."]
 
@@ -641,7 +567,7 @@ async def test_empty_ack_yields_no_spoken_line() -> None:
     transport.set_target_participant("pid-1")
     brain = _make_brain(transport)
 
-    async def _fake_quick_ack(_text):
+    async def _fake_quick_ack(_pid, _text):
         return ("", False)
 
     async def _fake_loop(*_a, **_k):
@@ -650,7 +576,7 @@ async def test_empty_ack_yields_no_spoken_line() -> None:
     brain._quick_ack = _fake_quick_ack      # noqa: SLF001
     brain._agentic_loop = _fake_loop        # noqa: SLF001
 
-    gen = await brain.handle_query("pid-1", "add a cube", False)
+    gen = await brain.handle_query("pid-1", "add a cube")
     spoken = [s async for s in gen]
     assert spoken == ["All set."]
     assert not [m for m in transport.sent if m.topic == "agent.progress"]
@@ -663,7 +589,7 @@ async def test_unpunctuated_ack_gets_terminal_period() -> None:
     transport.set_target_participant("pid-1")
     brain = _make_brain(transport)
 
-    async def _fake_quick_ack(_text):
+    async def _fake_quick_ack(_pid, _text):
         return ("Let me take a look", True)
 
     async def _fake_loop(*_a, **_k):
@@ -672,7 +598,7 @@ async def test_unpunctuated_ack_gets_terminal_period() -> None:
     brain._quick_ack = _fake_quick_ack      # noqa: SLF001
     brain._agentic_loop = _fake_loop        # noqa: SLF001
 
-    gen = await brain.handle_query("pid-1", "what am I holding", False)
+    gen = await brain.handle_query("pid-1", "what am I holding")
     spoken = [s async for s in gen]
 
     assert spoken[0] == "Let me take a look."
@@ -692,25 +618,56 @@ async def test_unpunctuated_ack_gets_terminal_period() -> None:
 from xr_ai_hub import FrameData, FrameSignal, PixelFormat  # noqa: E402
 from xr_ai_models import ChatResponse, ToolCall  # noqa: E402
 
-import processors as _proc  # noqa: E402
-import capabilities as _caps  # noqa: E402
-from xr_ai_nat.functions.spatial_math import SpatialMathFunctionsConfig  # noqa: E402
-from xr_ai_nat.functions.xr_tracking import XRTrackingFunctionsConfig  # noqa: E402
+from xr_render_demo_worker import scene_loop as _loop  # noqa: E402
+from xr_render_demo_worker import spatial_tools as _spatial_tools  # noqa: E402
+from xr_render_demo_worker import tools as _tools  # noqa: E402
+from xr_render_demo_worker import __main__ as _worker  # noqa: E402
+
+
+class _WarmupLLM:
+    def __init__(self, *, healthy: bool, fail_warmup: bool = False) -> None:
+        self.healthy = healthy
+        self.fail_warmup = fail_warmup
+        self.calls: list[tuple[list[ChatMessage], dict]] = []
+
+    async def health(self) -> bool:
+        return self.healthy
+
+    async def chat(self, messages: list[ChatMessage], **kwargs):
+        self.calls.append((messages, kwargs))
+        if self.fail_warmup:
+            raise RuntimeError("still loading")
+
+
+async def test_llm_warmup_waits_for_health() -> None:
+    llm = _WarmupLLM(healthy=False)
+
+    assert await _worker._probe_warmed_llm(llm, warmup=True) is False
+    assert llm.calls == []
+
+
+async def test_llm_readiness_requires_successful_warmup() -> None:
+    llm = _WarmupLLM(healthy=True, fail_warmup=True)
+
+    assert await _worker._probe_warmed_llm(llm, warmup=True) is False
+    assert len(llm.calls) == 1
+
+
+async def test_llm_warmup_probe_uses_first_turn_contract() -> None:
+    llm = _WarmupLLM(healthy=True)
+
+    assert await _worker._probe_warmed_llm(llm, warmup=True) is True
+    messages, options = llm.calls[0]
+    assert [message.content for message in messages] == ["Add a small cube."]
+    assert options == {"max_tokens": 40, "timeout": 120.0}
 
 
 async def test_render_spatial_native_toolbox_builds() -> None:
-    """The sample's prompt-compatible spatial surface derives from NAT Functions."""
-    async with WorkflowBuilder() as builder:
-        await builder.add_function_group(
-            "tracking",
-            XRTrackingFunctionsConfig(endpoint="tcp://127.0.0.1:65530", timeout_s=0.1),
-        )
-        await builder.add_function_group("spatial_math", SpatialMathFunctionsConfig())
-        await builder.add_function_group("render_spatial", _caps.RenderSpatialToolsConfig())
-        group = await builder.get_function_group("render_spatial")
-        toolbox = _caps.NativeToolbox(await group.get_all_functions())
-
-        definitions = {tool.name: tool for tool in toolbox.definitions()}
+    """The sample's prompt-compatible spatial surface uses native Tool schemas."""
+    tracking = TrackingTools("tcp://127.0.0.1:65530", timeout_s=0.1)
+    try:
+        spatial = _spatial_tools.RenderSpatialTools(tracking)
+        definitions = {tool.name: tool for tool in tool_definitions(spatial.tools)}
         expected_parameters = {
             "along_direction": {
                 "origin_x", "origin_y", "origin_z", "target_x", "target_y", "target_z", "distance",
@@ -733,21 +690,62 @@ async def test_render_spatial_native_toolbox_builds() -> None:
         }
         assert set(definitions) == set(expected_parameters)
         for name, parameters in expected_parameters.items():
-            assert set(definitions[name].parameters["properties"]) == parameters
+            properties = definitions[name].parameters["properties"]
+            assert set(properties) == parameters
+            assert all(prop.get("description") for prop in properties.values())
+    finally:
+        await tracking.close()
+
+
+async def test_render_spatial_vector_tools_execute_edge_cases() -> None:
+    tracking = TrackingTools("tcp://127.0.0.1:65530", timeout_s=0.1)
+    try:
+        spatial = _spatial_tools.RenderSpatialTools(tracking)
+        offset = await spatial.world_offset.execute(
+            _spatial_tools.WorldOffsetRequest(
+                origin_x=1.0, origin_y=2.0, origin_z=3.0,
+                dx=-0.5, dy=1.0, dz=2.0,
+            )
+        )
+        scaled = await spatial.scale_value.execute(
+            _spatial_tools.ScaleValueRequest(current=1.25, factor=2.0)
+        )
+        away = await spatial.along_direction.execute(
+            _spatial_tools.AlongDirectionRequest(
+                origin_x=0.0, origin_y=0.0, origin_z=0.0,
+                target_x=1.0, target_y=0.0, target_z=0.0, distance=-2.0,
+            )
+        )
+
+        assert offset.model_dump() == {"x": 0.5, "y": 3.0, "z": 5.0}
+        assert scaled.value == 2.5
+        assert away.model_dump() == {"x": -2.0, "y": 0.0, "z": 0.0}
+        with pytest.raises(RuntimeError, match="origin and target coincide"):
+            await spatial.along_direction.execute(
+                _spatial_tools.AlongDirectionRequest(
+                    origin_x=1.0, origin_y=1.0, origin_z=1.0,
+                    target_x=1.0, target_y=1.0, target_z=1.0,
+                    distance=0.5,
+                )
+            )
+    finally:
+        await tracking.close()
 
 
 async def test_live_worker_and_eval_share_native_toolbox_assembly() -> None:
-    """The shared builder exposes the complete runtime tool surface without MCP discovery."""
-    async with WorkflowBuilder() as builder:
-        toolbox, _vision_config = await _caps.build_native_toolbox(
-            builder,
-            scene_endpoint="tcp://127.0.0.1:65527",
-            openxr_endpoint="tcp://127.0.0.1:65528",
-            video_memory_endpoint="tcp://127.0.0.1:65529",
-            frame_endpoint=_FakeEndpoint(),
-            vlm=_FakeVLM(),
-        )
-        names = {tool.name for tool in toolbox.definitions()}
+    """NativeCapabilities exposes the complete runtime tool surface without MCP."""
+    capabilities = _tools.NativeCapabilities(
+        scene_endpoint="tcp://127.0.0.1:65527",
+        openxr_endpoint="tcp://127.0.0.1:65528",
+        video_memory_endpoint="tcp://127.0.0.1:65529",
+        frame_endpoint=_FakeEndpoint(),
+        vlm=_FakeVLM(),
+        text_memory_dir="/tmp/xr-render-test-memory",
+    )
+    try:
+        names = {name for name, _tool in capabilities.all.items()}
+    finally:
+        await capabilities.close()
 
     assert names == {
         "add_primitive",
@@ -783,29 +781,31 @@ async def test_model_facing_perception_schema_is_trimmed() -> None:
     for recorded lookups); exposing them verbatim would tell the model to fill a
     required ``participant_id`` it cannot know and whose value is discarded.
     Guards the do-not-reverse of main's trimmed ``{question}`` contract."""
-    from xr_render_demo_worker import _WORKER_MANAGED_TOOLS
-
-    async with WorkflowBuilder() as builder:
-        toolbox, _vision_config = await _caps.build_native_toolbox(
-            builder,
-            scene_endpoint="tcp://127.0.0.1:65527",
-            openxr_endpoint="tcp://127.0.0.1:65528",
-            video_memory_endpoint="tcp://127.0.0.1:65529",
-            frame_endpoint=_FakeEndpoint(),
-            vlm=_FakeVLM(),
-        )
+    capabilities = _tools.NativeCapabilities(
+        scene_endpoint="tcp://127.0.0.1:65527",
+        openxr_endpoint="tcp://127.0.0.1:65528",
+        video_memory_endpoint="tcp://127.0.0.1:65529",
+        frame_endpoint=_FakeEndpoint(),
+        vlm=_FakeVLM(),
+        text_memory_dir="/tmp/xr-render-test-memory",
+    )
+    try:
         # The raw native request schemas DO expose the injected context — which is
         # exactly why they must not reach the model verbatim.
-        native = {tool.name: tool for tool in toolbox.definitions()}
+        native = {tool.name: tool for tool in tool_definitions(capabilities.model)}
         assert "participant_id" in native["look_at_current_frame"].parameters["properties"]
         assert "participant_id" in native["look_at_past_frame"].parameters["properties"]
+        assert "get_frame_from_time" in native
 
         # Assemble the model-facing list exactly as the worker does.
-        tools = toolbox.definitions(
-            exclude=_WORKER_MANAGED_TOOLS
-            | {_proc._LIVE_PERCEPTION_TOOL, _proc._PAST_PERCEPTION_TOOL}
-        )
-        tools.extend(_proc._PERCEPTION_TOOL_DEFS)
+        tools = [
+            tool
+            for tool in tool_definitions(capabilities.model)
+            if tool.name not in {_loop.LIVE_PERCEPTION_TOOL, _loop.PAST_PERCEPTION_TOOL}
+        ]
+        tools.extend(_loop.PERCEPTION_TOOL_DEFS)
+    finally:
+        await capabilities.close()
 
     model_facing = {tool.name: tool for tool in tools}
     live = model_facing["look_at_current_frame"].parameters
@@ -902,34 +902,30 @@ def _now_us_test() -> int:
 
 @asynccontextmanager
 async def _perception_brain(transport, vlm: _FakeVLM):
-    config = VisionToolsConfig(
-        endpoint=transport.endpoint,
+    capabilities = _tools.NativeCapabilities(
+        scene_endpoint="tcp://127.0.0.1:65527",
+        openxr_endpoint="tcp://127.0.0.1:65528",
+        video_memory_endpoint="tcp://127.0.0.1:65529",
+        frame_endpoint=transport.endpoint,
         vlm=vlm,
-        video_memory=FunctionGroupRef("video_memory"),
+        text_memory_dir="/tmp/xr-render-test-memory",
         frame_max_age_s=60.0,
         frame_timeout_s=0.2,
     )
-    async with WorkflowBuilder() as builder:
-        # A resolvable (offline) video-memory group so the vision group builds;
-        # look_at_current_frame never touches it.
-        await builder.add_function_group(
-            "video_memory",
-            VideoMemoryFunctionsConfig(endpoint="tcp://127.0.0.1:65529"),
-        )
-        await builder.add_function_group("vision", config)
-        vision = await builder.get_function_group("vision")
-        toolbox = _caps.NativeToolbox(await vision.get_all_functions())
-        yield _proc.RenderSceneProcessor(
+    try:
+        yield _loop.SceneModelLoop(
             transport=transport,
             cfg=None,
-            toolbox=toolbox,
-            release_vision=config.release,
+            tools=capabilities.all,
+            release_vision=capabilities.release,
             text_memory=None,
             prompt_path=_SYSTEM_PROMPT,
-            tools=[],
+            model_tools=[],
             llm=None,
             agent_llm=None,
         )
+    finally:
+        await capabilities.close()
 
 
 def test_perception_tool_def_in_prompt_and_classifier() -> None:
@@ -981,15 +977,15 @@ async def test_perception_unavailable_frame_ends_turn_gracefully() -> None:
     transport = _CaptureTransport()
     brain = _make_brain(transport)  # _UnusedToolbox.invoke raises on call
 
-    with pytest.raises(_proc._PerceptionUnavailableError) as excinfo:
+    with pytest.raises(_loop._PerceptionUnavailableError) as excinfo:
         await brain._look_at_current_frame("pid-1", "What is shown?")  # noqa: SLF001
 
-    assert excinfo.value.spoken == _proc._NO_FRAME_MSG
+    assert excinfo.value.spoken == _loop._NO_FRAME_MSG
 
 
 def _stub_turn(brain, loop) -> None:
     """Stub the LLM-driven parts so _run_turn exercises only the status bracket."""
-    async def _ack(_text):
+    async def _ack(_pid, _text):
         return "", False
     brain._quick_ack = _ack        # noqa: SLF001
     brain._agentic_loop = loop     # noqa: SLF001
@@ -1145,9 +1141,55 @@ async def test_perception_no_frame_yields_graceful_message() -> None:
         )
 
     # Graceful spoken message, not a hang or a generic "Done." fallback.
-    assert answer == _proc._NO_FRAME_MSG
+    assert answer == _loop._NO_FRAME_MSG
     # Camera is always-on streaming — no startCamera/stopCamera messages sent.
     controls = [m for m in transport.sent if m.topic == "clientControl"]
     assert not any(b'"startCamera"' in m.data for m in controls)
     # VLM was never reached — there was no frame to ask about.
     assert vlm.calls == []
+
+
+def test_scene_loop_resets_only_the_target_participant_state() -> None:
+    brain = _make_brain(_CaptureTransport())
+    brain._history = {  # noqa: SLF001
+        "alice": [("a", "one")],
+        "bob": [("b", "two")],
+    }
+    brain._recent_moves = {  # noqa: SLF001
+        "alice": [("sphere-0", (0.0, 0.0, 0.0), (1.0, 0.0, 0.0))],
+        "bob": [("box-0", (0.0, 0.0, 0.0), (0.0, 1.0, 0.0))],
+    }
+    brain._pre_move_positions = {  # noqa: SLF001
+        "alice": {"sphere-0": (1.0, 0.0, 0.0)},
+        "bob": {"box-0": (0.0, 1.0, 0.0)},
+    }
+
+    brain.reset_history("alice")
+
+    assert "alice" not in brain._history  # noqa: SLF001
+    assert "alice" not in brain._recent_moves  # noqa: SLF001
+    assert "alice" not in brain._pre_move_positions  # noqa: SLF001
+    assert brain._history["bob"] == [("b", "two")]  # noqa: SLF001
+    assert "bob" in brain._recent_moves  # noqa: SLF001
+    assert "bob" in brain._pre_move_positions  # noqa: SLF001
+
+
+def test_scene_loop_bounds_participant_state_as_one_lru_unit() -> None:
+    brain = _make_brain(_CaptureTransport())
+    brain._participant_capacity = 2  # noqa: SLF001
+
+    def seed(participant_id: str) -> None:
+        brain._touch_participant_state(participant_id)  # noqa: SLF001
+        brain._history[participant_id] = [("user", participant_id)]  # noqa: SLF001
+        brain._recent_moves[participant_id] = []  # noqa: SLF001
+        brain._pre_move_positions[participant_id] = {}  # noqa: SLF001
+
+    seed("alice")
+    seed("bob")
+    brain._touch_participant_state("alice")  # noqa: SLF001
+    seed("carol")
+
+    assert list(brain._participant_order) == ["alice", "carol"]  # noqa: SLF001
+    for state in (brain._history, brain._recent_moves,  # noqa: SLF001
+                  brain._pre_move_positions):  # noqa: SLF001
+        assert set(state) == {"alice", "carol"}
