@@ -156,11 +156,18 @@ def test_worker_is_a_package_with_module_and_console_entry_points() -> None:
     assert "xr-ai-hub-client" in dependencies
     assert "xr-ai-agent-runtime" in dependencies
     assert project["tool"]["uv"]["sources"]["xr-ai-agent-runtime"]["path"] == (
-        "../../../agent-sdk/xr-ai-agent-runtime"
+        "../../../agent-sdk/xr-ai-runtime"
     )
+    assert (
+        _WORKER_DIR
+        / project["tool"]["uv"]["sources"]["xr-ai-agent-runtime"]["path"]
+    ).resolve().is_dir()
     assert project["tool"]["uv"]["sources"]["xr-ai-hub-client"]["path"] == (
-        "../../../agent-sdk/xr-ai-hub-client"
+        "../../../agent-sdk/xr-ai-hub"
     )
+    assert (
+        _WORKER_DIR / project["tool"]["uv"]["sources"]["xr-ai-hub-client"]["path"]
+    ).resolve().is_dir()
     assert "xr-ai-tools[live-vision]" in dependencies
     assert all("[vision" not in dependency and "[voice" not in dependency for dependency in dependencies)
     assert "xr-ai-voice" in dependencies

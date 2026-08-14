@@ -16,7 +16,6 @@ dependencies = [
     "xr-ai-hub-client",
     "xr-ai-models",
     "xr-ai-tools[live-vision,services]",
-    "xr-ai-pipecat",
     "xr-ai-voice",
     "xr-media-hub",
     "xr-ai-launcher",
@@ -33,15 +32,15 @@ dependencies = [
     "numpy>=1.24",
     # Direct test deps used across CPU native vision/service tests and GPU coverage.
     "Pillow>=10.0",
+    "python-multipart>=0.0.9",
     "pyyaml>=6.0",
 ]
 
 [tool.uv.sources]
-xr-ai-agent-runtime      = { path = "../agent-sdk/xr-ai-agent-runtime",       editable = true }
-xr-ai-hub-client           = { path = "../agent-sdk/xr-ai-hub-client",                        editable = true }
+xr-ai-agent-runtime      = { path = "../agent-sdk/xr-ai-runtime",       editable = true }
+xr-ai-hub-client           = { path = "../agent-sdk/xr-ai-hub",                        editable = true }
 xr-ai-models          = { path = "../agent-sdk/xr-ai-models",           editable = true }
 xr-ai-tools           = { path = "../agent-sdk/xr-ai-tools",            editable = true }
-xr-ai-pipecat         = { path = "../agent-sdk/xr-ai-pipecat",          editable = true }
 xr-ai-voice           = { path = "../agent-sdk/xr-ai-voice",            editable = true }
 xr-media-hub          = { path = "../services/xr-media-hub",             editable = true }
 xr-ai-launcher        = { path = "../utils/xr-ai-launcher",             editable = true }
