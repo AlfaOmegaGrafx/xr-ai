@@ -509,18 +509,22 @@ async def test_vad_stt_retries_partial_probe_until_wake_phrase_is_recognized(mon
 
 
 @pytest.mark.asyncio
-async def test_vad_stt_stops_partial_probes_after_rejected_prefix(monkeypatch):
+async def test_vad_stt_retries_partial_probe_after_background_sentence(monkeypatch):
     _StagedVad.instances.clear()
-    stt = _StagedStt(texts=["ordinary room conversation"])
-
-    async def reject_partial(_pid: str, _text: str) -> bool | None:
-        return None
+    stt = _StagedStt(texts=[
+        "background.",
+        "background. hey agent place a cube",
+    ])
+    gate = VoiceGateProcessor(
+        cfg=VoiceGateConfig(magic_phrases=("hey agent",)),
+        tts=_FakeTts(),
+    )
 
     monkeypatch.setattr("xr_ai_voice._processors.vad_stt.VadDetector", _StagedVad)
     proc = VadSttProcessor(
         stt=stt,
         vad_cfg=VadConfig(stop_probe_after_s=0.05),
-        on_partial_transcript=reject_partial,
+        on_partial_transcript=gate.handle_partial_transcript,
     )
     frame = InputAudioRawFrame(
         audio=b"\x00\x00" * 320,
@@ -531,7 +535,7 @@ async def test_vad_stt_stops_partial_probes_after_rejected_prefix(monkeypatch):
 
     await _run_chain(proc, sends=[frame], settle_s=0.25)
 
-    assert len(stt.calls) == 1
+    assert len(stt.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -1036,7 +1040,7 @@ async def test_voice_gate_processor_chimes_on_partial_wake_without_dispatching_e
 
 
 @pytest.mark.asyncio
-async def test_voice_gate_processor_classifies_partial_wake_prefixes():
+async def test_voice_gate_processor_keeps_partial_wake_probes_open():
     cfg = VoiceGateConfig(
         magic_phrases=("agent", "hey agent"),
         listening_chime=True,
@@ -1044,7 +1048,8 @@ async def test_voice_gate_processor_classifies_partial_wake_prefixes():
     proc = VoiceGateProcessor(cfg=cfg, tts=_FakeTts())
 
     assert await proc.handle_partial_transcript("pid-1", "hey") is False
-    assert await proc.handle_partial_transcript("pid-1", "room conversation") is None
+    assert await proc.handle_partial_transcript("pid-1", "room conversation") is False
+    assert await proc.handle_partial_transcript("pid-1", "background.") is False
 
 
 @pytest.mark.asyncio
