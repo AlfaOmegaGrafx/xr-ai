@@ -138,6 +138,10 @@ preserving provider input. Timelines supplied to video inference are described
 as estimates because recorded-frame timestamps are interpolated from chunk
 metadata rather than persisted per-frame presentation timestamps.
 
+Derived images use `ImageRegistry.put_derived(...)` to inherit the source
+reference's owner, so participant or workflow cleanup releases the source and
+all derived pixels together.
+
 ```python
 from xr_ai_tools.current_frame import CurrentFrameRequest, CurrentFrameTool
 from xr_ai_tools.image import ImageReference, ImageRegistry
@@ -218,3 +222,42 @@ qr_codes = QRCodeTool(
 Call `release(participant_id)` when a participant disconnects. Applications
 that expose the tool to a model should inject the active participant identity
 at their workflow boundary, as they do for other participant-scoped tools.
+
+## Magenta polygon image editing
+
+Install `xr-ai-tools[image-editing]` to fill an image-space polygon with
+standard magenta (`#FF00FF`). `ImagePolygonFillTool` accepts an image reference
+and at least three ordered pixel coordinates. It connects the final point to
+the first, validates that the polygon is inside the image and encloses an area,
+and stores a new lossless PNG without changing the source image. The returned
+reference inherits the source owner and can be passed directly to an image
+query tool. Stale image references and invalid polygons return
+`available=False` with a recoverable message instead of raising an internal
+tool error.
+
+```python
+from pathlib import Path
+
+from xr_ai_tools.image import ImageRegistry
+from xr_ai_tools.image_polygon import (
+    ImagePoint,
+    ImagePolygonFillRequest,
+    ImagePolygonFillTool,
+)
+
+images = ImageRegistry()
+source = images.put(Path("measurement.png"))
+fill_polygon = ImagePolygonFillTool(images=images)
+
+result = await fill_polygon.execute(
+    ImagePolygonFillRequest(
+        image=source,
+        coordinates=[
+            ImagePoint(x=40, y=30),
+            ImagePoint(x=140, y=30),
+            ImagePoint(x=140, y=130),
+            ImagePoint(x=40, y=130),
+        ],
+    )
+)
+```
