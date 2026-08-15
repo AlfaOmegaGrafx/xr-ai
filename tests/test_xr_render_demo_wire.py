@@ -608,12 +608,8 @@ async def test_unpunctuated_ack_gets_terminal_period() -> None:
 
 # ── live-frame perception routing (look_at_current_frame) ──────────────────────
 #
-# A real-world visual question — "what colour is this thing I'm holding?" — must
-# reach the LIVE-FRAME VLM path, not stall in the reasoning loop. Before the fix
-# the render-demo worker had no frame tracking and never turned the camera on, so
-# a perception query looped on an unanswerable tool (get_frame_from_time, which
-# isn't even registered when recording is disabled) and hung. These tests stub
-# the VLM client + the hub frame path and assert the routing mechanically.
+# A real-world visual question must reach the live-frame VLM path. These tests
+# stub the VLM client and hub frame path to verify that routing contract.
 
 from xr_ai_hub import FrameData, FrameSignal, PixelFormat  # noqa: E402
 from xr_ai_models import ChatResponse, ToolCall  # noqa: E402
@@ -753,20 +749,25 @@ async def test_live_worker_and_eval_share_native_toolbox_assembly() -> None:
         "between_anchors",
         "displace_object",
         "displace_objects",
-        "get_frame_from_time",
+        "get_current_frame",
+        "get_historical_frame",
+        "get_historical_frames",
+        "get_historical_video",
         "get_head_pose",
         "get_health",
+        "get_latest_video",
         "get_scene_state",
         "get_video_stats",
         "list_recorded_participants",
-        "look_at_current_frame",
-        "look_at_past_frame",
         "place_inside_by_id",
         "place_object_relative",
         "place_user_relative",
         "position_ahead",
         "position_relative",
+        "query_image",
+        "query_images",
         "query_video",
+        "get_latest_frames",
         "remove_primitive",
         "scale_value",
         "start_xr",
@@ -776,11 +777,12 @@ async def test_live_worker_and_eval_share_native_toolbox_assembly() -> None:
 
 
 async def test_model_facing_perception_schema_is_trimmed() -> None:
-    """The perception tools reach the model with participant/reference context
-    stripped. The worker injects ``participant_id`` (and ``reference_time_us``
-    for recorded lookups); exposing them verbatim would tell the model to fill a
-    required ``participant_id`` it cannot know and whose value is discarded.
-    Guards the do-not-reverse of main's trimmed ``{question}`` contract."""
+    """The model sees participant-free perception facades, not internal tools.
+
+    The worker injects participant and absolute-time context, selects an image,
+    and then calls ``query_image`` without exposing either internal contract to
+    the model.
+    """
     capabilities = _tools.NativeCapabilities(
         scene_endpoint="tcp://127.0.0.1:65527",
         openxr_endpoint="tcp://127.0.0.1:65528",
@@ -790,12 +792,20 @@ async def test_model_facing_perception_schema_is_trimmed() -> None:
         text_memory_dir="/tmp/xr-render-test-memory",
     )
     try:
-        # The raw native request schemas DO expose the injected context — which is
-        # exactly why they must not reach the model verbatim.
         native = {tool.name: tool for tool in tool_definitions(capabilities.model)}
-        assert "participant_id" in native["look_at_current_frame"].parameters["properties"]
-        assert "participant_id" in native["look_at_past_frame"].parameters["properties"]
-        assert "get_frame_from_time" in native
+        assert "get_current_frame" not in native
+        assert "query_image" not in native
+        assert "look_at_current_frame" not in native
+        assert "look_at_past_frame" not in native
+        assert not {
+            "get_historical_frame",
+            "get_historical_frames",
+            "get_historical_video",
+            "get_latest_frames",
+            "get_latest_video",
+            "query_images",
+            "query_video",
+        } & native.keys()
 
         # Assemble the model-facing list exactly as the worker does.
         tools = [
@@ -818,6 +828,18 @@ async def test_model_facing_perception_schema_is_trimmed() -> None:
     for schema in (live, past):
         assert "participant_id" not in schema["properties"]
         assert "reference_time_us" not in schema["properties"]
+        assert "start_us" not in schema["properties"]
+
+
+async def test_model_dispatch_rejects_tools_outside_the_advertised_schema() -> None:
+    brain = _make_brain(_CaptureTransport())
+
+    result = await brain._execute_tool(  # noqa: SLF001
+        "query_image",
+        {"image": {"uri": "file:///etc/passwd"}, "query": "Read this"},
+    )
+
+    assert result == {"error": "Unknown model tool: query_image"}
 
 
 class _FakeEndpoint:
@@ -861,16 +883,16 @@ class _CaptureTransportWithEndpoint(_CaptureTransport):
 
 
 class _FakeVLM:
-    """VLMService double — records the ask_image call and returns a canned
+    """VLMService double — records image calls and returns a canned
     ChatResponse so we can assert the perception path reached the VLM."""
 
     def __init__(self, answer: str = "It's a red mug.") -> None:
         self.answer = answer
         self.calls: list[tuple[str, str]] = []
 
-    async def ask_image(self, image, question, *, system_prompt: str = "",
-                        **_kw) -> ChatResponse:
-        self.calls.append((image, question))
+    async def ask_images(self, images, question, *, system_prompt: str = "",
+                         **_kw) -> ChatResponse:
+        self.calls.append((images, question))
         return ChatResponse(
             content=self.answer, reasoning=None, tool_calls=None,
             finish_reason="stop", raw={},
@@ -920,7 +942,7 @@ async def _perception_brain(transport, vlm: _FakeVLM):
             release_vision=capabilities.release,
             text_memory=None,
             prompt_path=_SYSTEM_PROMPT,
-            model_tools=[],
+            model_tools=list(_loop.PERCEPTION_TOOL_DEFS),
             llm=None,
             agent_llm=None,
         )
@@ -957,10 +979,11 @@ async def test_perception_query_reaches_vlm_frame_path() -> None:
             pid="pid-1",
         )
 
-    # Reached the VLM with the encoded frame + the question.
+    # Reached the VLM with selected JPEG bytes + the question.
     assert len(vlm.calls) == 1
-    image, question = vlm.calls[0]
-    assert image.startswith("data:image/jpeg;base64,")
+    images, question = vlm.calls[0]
+    assert len(images) == 1
+    assert isinstance(images[0], bytes)
     assert "colour" in question
     # The pixel request used the seeded live frame.
     assert transport.endpoint.frame_requests == [sig]
@@ -969,7 +992,7 @@ async def test_perception_query_reaches_vlm_frame_path() -> None:
 
 
 async def test_perception_unavailable_frame_ends_turn_gracefully() -> None:
-    """A failed live-vision invocation ends the turn via the graceful no-frame path.
+    """A failed image query ends the turn via the graceful no-frame path.
 
     The native ``look_at_current_frame`` raises (no frame / no VLM answer); the
     processor converts any failure into a ``_PerceptionUnavailableError`` carrying

@@ -46,8 +46,11 @@ docs/source/     User and contributor documentation
   concurrency policy.
 - Application-specific capabilities stay with their application. Shared
   process boundaries use typed msgpack/ZMQ services, not MCP.
-- Native vision tools acquire live or recorded frames themselves and call a
-  `VLMService`; raw media remains on the hub path.
+- Image selection and visual inference are separate tools. Selection returns
+  lightweight image references; single-image, multi-image, and timestamped
+  video-frame query tools resolve them through `VLMService`. Raw media remains
+  on the hub path and out of tool results. Latest recorded windows need only a
+  duration; historical frame and video selection share an absolute `start_us`.
 
 The authoritative dependency graph and enforced package limits are in
 [`DEPENDENCIES.md`](DEPENDENCIES.md).

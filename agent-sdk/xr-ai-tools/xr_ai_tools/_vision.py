@@ -1,97 +1,74 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared schemas and Relay codecs for live-vision tools."""
+"""Relay helpers shared by single-image, multi-image, and video-frame queries."""
 
 from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import nemo_relay
-from pydantic import BaseModel, ConfigDict, Field
 
 VLM_CALL_NAME = "xr-ai-vlm"
-_FRAME_REDACTION = "<redacted:live-camera-frame>"
+_IMAGE_REDACTION = "<redacted:image>"
 
 
-class VisionRequest(BaseModel):
-    """Ask one question about a participant's current live camera frame."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    participant_id: str = Field(
-        description="Participant whose camera frame should be inspected.",
-    )
-    query: str = Field(
-        min_length=1,
-        description="Question to answer from the camera frame.",
-    )
-
-
-class VisionResponse(BaseModel):
-    """A complete answer and whether current-frame perception succeeded."""
-
-    text: str = Field(description="Complete answer text.")
-    available: bool = Field(
-        default=True,
-        description="Whether a current frame produced a usable visual answer.",
-    )
-
-
-class VisionChunk(BaseModel):
-    """One text fragment from a streamed current-frame answer."""
-
-    text: str = Field(description="A partial fragment of the streamed answer text.")
-
-
-def register_frame_sanitizer() -> None:
-    """Redact the current frame from events in the active tool scope."""
+def register_image_sanitizer() -> None:
+    """Redact image locations from VLM events in the active tool scope."""
 
     nemo_relay.scope_local.register_llm_sanitize_request(
         nemo_relay.scope.get_handle(),
-        "xr-ai-live-frame",
+        "xr-ai-image",
         0,
-        _sanitize_live_frame,
+        _sanitize_images,
     )
 
 
 def relay_request(
     system_prompt: str,
-    image_url: str,
+    images: Sequence[tuple[str, int | None]],
     query: str,
 ) -> nemo_relay.LLMRequest:
-    """Build the shared OpenAI-compatible current-frame request."""
+    """Build one OpenAI-compatible request over ordered image references."""
 
+    if not images:
+        raise ValueError("at least one image is required")
+    parts: list[dict[str, object]] = []
+    for image_uri, timestamp_us in images:
+        part: dict[str, object] = {
+            "type": "image_url",
+            "image_url": {"url": image_uri},
+        }
+        if timestamp_us is not None:
+            part["timestamp_us"] = timestamp_us
+        parts.append(part)
+    parts.append({"type": "text", "text": query})
     return nemo_relay.LLMRequest(
         {},
         {
             "model": VLM_CALL_NAME,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": query},
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                    ],
-                },
+                {"role": "user", "content": parts},
             ],
         },
     )
 
 
-def vision_inputs(content: Mapping[str, object]) -> tuple[str, str, str]:
-    """Decode the image, query, and system prompt from a Relay request."""
+def vision_inputs(
+    content: Mapping[str, object],
+) -> tuple[list[tuple[str, int | None]], str, str]:
+    """Decode ordered images, optional timestamps, query, and system prompt."""
 
     messages = content.get("messages")
     if not isinstance(messages, list):
         raise TypeError("Relay VLM request must contain a message array")
 
     system_prompt = ""
-    image_url: str | None = None
+    images: list[tuple[str, int | None]] = []
     query: str | None = None
     for message in messages:
         if not isinstance(message, Mapping):
@@ -103,19 +80,35 @@ def vision_inputs(content: Mapping[str, object]) -> tuple[str, str, str]:
                 raise TypeError("Relay VLM system content must be text")
             system_prompt = raw_content
         elif role == "user":
-            candidate_image, candidate_query = _image_and_text(raw_content)
-            if candidate_image is not None:
-                image_url = candidate_image
-            if candidate_query is not None:
-                query = candidate_query
+            images, query = _images_and_text(raw_content)
 
-    if image_url is None or query is None:
-        raise ValueError("Relay VLM request needs one image URL and one text question")
-    return image_url, query, system_prompt
+    if not images or query is None:
+        raise ValueError("Relay VLM request needs at least one image and one text question")
+    return images, query, system_prompt
+
+
+def timestamped_question(query: str, timestamps: Sequence[int | None]) -> str:
+    """Attach ordered frame timing when a query represents a video timeline."""
+
+    if not timestamps or all(timestamp is None for timestamp in timestamps):
+        return query
+    if any(timestamp is None for timestamp in timestamps):
+        raise ValueError("video frame timestamps must be complete")
+    concrete = [timestamp for timestamp in timestamps if timestamp is not None]
+    origin = concrete[0]
+    timeline = ", ".join(
+        f"frame {index}: estimated_timestamp_us={timestamp}, "
+        f"estimated_offset_s={(timestamp - origin) / 1_000_000:.6f}"
+        for index, timestamp in enumerate(concrete, start=1)
+    )
+    return (
+        "The images are video frames in chronological order. "
+        f"Timeline values are approximate: {timeline}\n\n{query}"
+    )
 
 
 def openai_response(text: str) -> dict[str, Any]:
-    """Build the complete Relay response used by both VLM paths."""
+    """Build the complete Relay response used by all visual query paths."""
 
     return {
         "model": VLM_CALL_NAME,
@@ -168,7 +161,7 @@ def stream_text(raw_chunk: object) -> str:
     return content
 
 
-def _sanitize_live_frame(
+def _sanitize_images(
     request: nemo_relay.LLMRequest,
     _context: nemo_relay.LlmSanitizeRequestContext,
 ) -> nemo_relay.LLMRequest:
@@ -186,14 +179,16 @@ def _sanitize_live_frame(
                     continue
                 image = part.get("image_url")
                 if isinstance(image, dict) and isinstance(image.get("url"), str):
-                    image["url"] = _FRAME_REDACTION
+                    image["url"] = _IMAGE_REDACTION
     return nemo_relay.LLMRequest(dict(request.headers), content)
 
 
-def _image_and_text(content: object) -> tuple[str | None, str | None]:
+def _images_and_text(
+    content: object,
+) -> tuple[list[tuple[str, int | None]], str | None]:
     if not isinstance(content, list):
         raise TypeError("Relay VLM user content must be a multimodal array")
-    image_url: str | None = None
+    images: list[tuple[str, int | None]] = []
     query: str | None = None
     for part in content:
         if not isinstance(part, Mapping):
@@ -202,6 +197,10 @@ def _image_and_text(content: object) -> tuple[str | None, str | None]:
             query = part["text"]
         elif part.get("type") == "image_url":
             image = part.get("image_url")
-            if isinstance(image, Mapping) and isinstance(image.get("url"), str):
-                image_url = image["url"]
-    return image_url, query
+            if not isinstance(image, Mapping) or not isinstance(image.get("url"), str):
+                continue
+            timestamp = part.get("timestamp_us")
+            if timestamp is not None and not isinstance(timestamp, int):
+                raise TypeError("Relay VLM frame timestamp must be an integer")
+            images.append((image["url"], timestamp))
+    return images, query

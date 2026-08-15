@@ -92,25 +92,90 @@ instances are consumed explicitly with `stream()`.
 ## Typed capability services
 
 Install `xr-ai-tools[services]` for the msgpack/ZMQ RPC client/server and the
-shared tracking, video-memory, historical-vision, text-memory, and spatial
+shared tracking, video-memory, text-memory, and spatial
 building blocks. Applications compose these finite tools into their own
 `ToolSet`; service processes use the matching RPC primitives without pulling
 in an agent framework or HTTP server.
 
 Each capability has a focused import surface: `tracking`, `video_memory`,
-`historical_vision`, `text_memory`, `spatial`, and their shared request types in
-`types`. RPC transport remains isolated in `rpc`.
+`text_memory`, `spatial`, and their shared request types in `types`. RPC
+transport remains isolated in `rpc`.
 
-## Finite and streaming live vision tools
+## Image selection and VLM query tools
 
-Install `xr-ai-tools[live-vision]` for two independent current-frame
-tools. `LiveVisionTool` is a finite `Tool` that returns one complete
-`VisionResponse` for agentic planning. `StreamingVisionTool` is an `AsyncTool`
-that yields typed `VisionChunk` values. It has no voice dependency or output
-transport; applications decide how to consume its async stream.
+Install `xr-ai-tools[frames]` for live-frame selection and
+`xr-ai-tools[vision]` for VLM queries. Image selection does not invoke a model:
+`CurrentFrameTool` returns an `ImageFrame`, while
+`VideoMemoryTools` groups recorded selection by timing:
 
-Each tool owns its own participant frame source and calls an injected
-`VLMService`. Both forward controlled Relay headers and redact inline camera
-frames from events while preserving provider input. The finite path uses
-Relay's managed tool and LLM boundaries; the streaming path uses a typed tool
-scope around Relay's managed streaming LLM boundary.
+- `latest_tools` contains `get_latest_video` and `get_latest_frames`;
+  their windows end at the newest recorded timestamp and require only
+  `duration_seconds`.
+- `historical_tools` contains `get_historical_frame`,
+  `get_historical_frames`, and `get_historical_video`; they share one
+  absolute `start_us`, with video and sampling adding `duration_seconds`.
+
+`get_current_frame` joins the latest group conceptually as the live-image
+equivalent. Every selected frame carries the same `ImageReference`; timed
+frames also share the `TimedImage` contract consumed by video queries.
+
+`ImageQueryTool` returns one complete `ImageQueryResult` for any image reference;
+`MultiImageQueryTool` queries an ordered image collection, and `VideoQueryTool`
+queries chronological `TimedImage` frames with their timestamps and relative
+offsets. `StreamingImageQueryTool` preserves the low-latency single-image path.
+All four tools use one list-based inference implementation. The shipped Cosmos
+deployment accepts at most four images in one `query_images` or `query_video`
+call. This inference limit is separate from the video-memory sampling budget;
+select the relevant subset before querying the VLM.
+
+In-memory bytes use a bounded `ImageRegistry`, whose opaque handles keep tool
+results and telemetry small. Registries accept only their own opaque references
+by default. Trusted applications may opt into local paths, file URIs, and
+HTTP(S) URLs with `ImageRegistry(allow_external=True)`, but must not expose an
+external-enabled query tool directly to an untrusted model. Query tools forward
+controlled Relay headers and redact every image location from VLM events while
+preserving provider input. Timelines supplied to video inference are described
+as estimates because recorded-frame timestamps are interpolated from chunk
+metadata rather than persisted per-frame presentation timestamps.
+
+```python
+from xr_ai_tools.current_frame import CurrentFrameRequest, CurrentFrameTool
+from xr_ai_tools.image import ImageReference, ImageRegistry
+from xr_ai_tools.video_memory import LatestFramesRequest
+from xr_ai_tools.vision import (
+    ImageQueryRequest,
+    ImageQueryTool,
+    VideoQueryRequest,
+    VideoQueryTool,
+)
+
+images = ImageRegistry(allow_external=True)
+frames = CurrentFrameTool(endpoint=endpoint, images=images)
+vision = ImageQueryTool(images=images, vlm=vlm)
+video = VideoQueryTool(images=images, vlm=vlm)
+
+frame = await frames.execute(CurrentFrameRequest(participant_id="alice"))
+answer = await vision.execute(
+    ImageQueryRequest(image=frame.image, query="What is on the table?")
+)
+
+# The same VLM tool accepts images that did not come from a camera tool.
+other = await vision.execute(
+    ImageQueryRequest(
+        image=ImageReference(uri="/tmp/reference.png"),
+        query="Does this match the current object?",
+    )
+)
+
+# The newest recorded window needs no caller-supplied timestamp.
+sample = await video_memory.get_latest_frames.execute(
+    LatestFramesRequest(
+        participant_id="alice",
+        duration_seconds=10,
+        frame_budget=4,
+    )
+)
+change = await video.execute(
+    VideoQueryRequest(frames=sample.frames, query="What changed over time?")
+)
+```

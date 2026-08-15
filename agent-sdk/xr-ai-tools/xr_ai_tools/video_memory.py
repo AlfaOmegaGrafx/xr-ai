@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, model_validator
 
+from .image import TimedImage
 from .rpc import RPCClient
 from .tools import Tool
 from .types import EmptyRequest, StrictRequest
@@ -29,48 +30,108 @@ class VideoStatsResult(BaseModel):
     latest_us: int
 
 
-class QueryVideoRequest(StrictRequest):
+class _ParticipantRequest(StrictRequest):
     participant_id: str = Field(min_length=1)
-    start_us: int = Field(gt=0)
-    end_us: int = Field(gt=0)
-
-    @model_validator(mode="after")
-    def validate_window(self) -> QueryVideoRequest:
-        if self.end_us <= self.start_us:
-            raise ValueError("end_us must be greater than start_us")
-        return self
 
 
-class QueryVideoResult(BaseModel):
+class _DurationRequest(_ParticipantRequest):
+    duration_seconds: int = Field(
+        gt=0,
+        le=300,
+        description="Whole seconds of recorded history in the requested window.",
+    )
+
+
+class LatestVideoRequest(_DurationRequest):
+    """Select the newest recorded video window."""
+
+
+class HistoricalVideoRequest(_DurationRequest):
+    """Select a recorded video window beginning at an absolute timestamp."""
+
+    start_us: int = Field(
+        gt=0,
+        description="Unix-epoch timestamp in microseconds at the start of the window.",
+    )
+
+
+class RecordedVideoResult(BaseModel):
     path: str
     size: int
     start_us: int
     end_us: int
 
 
-class HistoricalFrameRequest(StrictRequest):
-    participant_id: str = Field(
-        min_length=1,
-        description="Exact participant identity whose recorded frame should be extracted.",
-    )
-    second_ago: int = Field(
-        default=0,
-        ge=0,
-        description="Whole seconds before reference_time_us.",
-    )
-    reference_time_us: int = Field(
+class _FrameSamplingRequest(_DurationRequest):
+    frame_budget: int = Field(
         gt=0,
-        description="Unix-epoch timestamp in microseconds used as the lookup reference.",
+        le=256,
+        description="Maximum total number of evenly distributed frames to return.",
+    )
+    max_width: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional maximum exported width; requires max_height.",
+    )
+    max_height: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional maximum exported height; requires max_width.",
+    )
+
+    @model_validator(mode="after")
+    def validate_resolution(self) -> _FrameSamplingRequest:
+        if (self.max_width is None) != (self.max_height is None):
+            raise ValueError("max_width and max_height must be provided together")
+        return self
+
+
+class LatestFramesRequest(_FrameSamplingRequest):
+    """Sample the newest recorded frame window."""
+
+
+class HistoricalFramesRequest(_FrameSamplingRequest):
+    """Sample a recorded frame window beginning at an absolute timestamp."""
+
+    start_us: int = Field(
+        gt=0,
+        description="Unix-epoch timestamp in microseconds at the start of the window.",
     )
 
 
-class HistoricalFrameResult(BaseModel):
-    path: str
+class SampledVideoFrame(TimedImage):
+    timestamp_us: int = Field(
+        ge=0,
+        description="Estimated Unix-epoch timestamp interpolated from recording chunk metadata.",
+    )
     width: int
     height: int
-    timestamp_us: int
-    second_ago: int
-    actual_second_ago: float
+
+
+class SampleFramesResult(BaseModel):
+    frames: list[SampledVideoFrame]
+    start_us: int
+    end_us: int
+    duration_seconds: int
+    frame_budget: int
+    max_width: int | None
+    max_height: int | None
+
+
+class HistoricalFrameRequest(_ParticipantRequest):
+    start_us: int = Field(
+        gt=0,
+        description="Unix-epoch timestamp in microseconds of the requested frame.",
+    )
+
+
+class HistoricalFrameResult(TimedImage):
+    timestamp_us: int = Field(
+        ge=0,
+        description="Estimated Unix-epoch timestamp interpolated from recording chunk metadata.",
+    )
+    width: int
+    height: int
 
 
 class VideoHealthResult(BaseModel):
@@ -97,25 +158,55 @@ class VideoMemoryTools:
             VideoStatsResult,
             self._get_video_stats,
         )
-        self.query_video = Tool(
-            "query_video",
-            "Write an H.264 clip overlapping an absolute Unix-epoch microsecond window and return its local path.",
-            QueryVideoRequest,
-            QueryVideoResult,
-            self._query_video,
+        self.get_latest_video = Tool(
+            "get_latest_video",
+            "Return the newest recorded H.264 window for a participant and duration.",
+            LatestVideoRequest,
+            RecordedVideoResult,
+            self._get_latest_video,
         )
-        self.get_frame_from_time = Tool(
-            "get_frame_from_time",
-            "Extract the recorded PNG frame nearest reference_time_us minus second_ago whole seconds.",
+        self.get_latest_frames = Tool(
+            "get_latest_frames",
+            "Return bounded timestamped frames from the newest recorded window.",
+            LatestFramesRequest,
+            SampleFramesResult,
+            self._get_latest_frames,
+        )
+        self.get_historical_frame = Tool(
+            "get_historical_frame",
+            "Return the recorded PNG frame nearest an absolute Unix-epoch microsecond timestamp.",
             HistoricalFrameRequest,
             HistoricalFrameResult,
-            self._get_frame_from_time,
+            self._get_historical_frame,
+        )
+        self.get_historical_video = Tool(
+            "get_historical_video",
+            "Return recorded H.264 beginning at start_us for the requested duration.",
+            HistoricalVideoRequest,
+            RecordedVideoResult,
+            self._get_historical_video,
+        )
+        self.get_historical_frames = Tool(
+            "get_historical_frames",
+            "Return bounded timestamped frames beginning at start_us for the requested duration.",
+            HistoricalFramesRequest,
+            SampleFramesResult,
+            self._get_historical_frames,
+        )
+        self.latest_tools = (
+            self.get_latest_video,
+            self.get_latest_frames,
+        )
+        self.historical_tools = (
+            self.get_historical_frame,
+            self.get_historical_frames,
+            self.get_historical_video,
         )
         self.tools = (
             self.list_recorded_participants,
             self.get_video_stats,
-            self.query_video,
-            self.get_frame_from_time,
+            *self.latest_tools,
+            *self.historical_tools,
         )
 
     async def _list_recorded_participants(
@@ -131,17 +222,44 @@ class VideoMemoryTools:
             await self._rpc.call("get_video_stats", request.model_dump())
         )
 
-    async def _query_video(self, request: QueryVideoRequest) -> QueryVideoResult:
-        return QueryVideoResult.model_validate(
-            await self._rpc.call("query_video", request.model_dump())
+    async def _get_latest_video(
+        self,
+        request: LatestVideoRequest,
+    ) -> RecordedVideoResult:
+        return RecordedVideoResult.model_validate(
+            await self._rpc.call("get_latest_video", request.model_dump())
         )
 
-    async def _get_frame_from_time(
+    async def _get_latest_frames(
+        self,
+        request: LatestFramesRequest,
+    ) -> SampleFramesResult:
+        return SampleFramesResult.model_validate(
+            await self._rpc.call("get_latest_frames", request.model_dump())
+        )
+
+    async def _get_historical_frame(
         self,
         request: HistoricalFrameRequest,
     ) -> HistoricalFrameResult:
         return HistoricalFrameResult.model_validate(
-            await self._rpc.call("get_frame_from_time", request.model_dump())
+            await self._rpc.call("get_historical_frame", request.model_dump())
+        )
+
+    async def _get_historical_video(
+        self,
+        request: HistoricalVideoRequest,
+    ) -> RecordedVideoResult:
+        return RecordedVideoResult.model_validate(
+            await self._rpc.call("get_historical_video", request.model_dump())
+        )
+
+    async def _get_historical_frames(
+        self,
+        request: HistoricalFramesRequest,
+    ) -> SampleFramesResult:
+        return SampleFramesResult.model_validate(
+            await self._rpc.call("get_historical_frames", request.model_dump())
         )
 
     async def get_health(self) -> VideoHealthResult:
@@ -162,9 +280,14 @@ class VideoMemoryTools:
 __all__ = [
     "HistoricalFrameRequest",
     "HistoricalFrameResult",
+    "HistoricalFramesRequest",
+    "HistoricalVideoRequest",
+    "LatestFramesRequest",
+    "LatestVideoRequest",
     "ListRecordedParticipantsResult",
-    "QueryVideoRequest",
-    "QueryVideoResult",
+    "RecordedVideoResult",
+    "SampleFramesResult",
+    "SampledVideoFrame",
     "VideoHealthResult",
     "VideoMemoryTools",
     "VideoStatsRequest",

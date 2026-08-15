@@ -53,14 +53,15 @@ _MAX_LOOP = 10  # visual queries need up to 5 steps; give headroom
 _PARTICIPANT_STATE_CAPACITY = 1024
 
 
-# Native perception tools exposed to the model. The processor supplies participant context (and the utterance time for
-# recorded lookups) that the model never provides.
+# Native perception tools exposed to the model. The processor supplies participant
+# and utterance-time context that the model never provides.
 LIVE_PERCEPTION_TOOL = "look_at_current_frame"
 PAST_PERCEPTION_TOOL = "look_at_past_frame"
+CURRENT_FRAME_TOOL = "get_current_frame"
+IMAGE_QUERY_TOOL = "query_image"
 
-# Model-facing perception schemas. The native vision request models
-# also carry ``participant_id`` (and ``reference_time_us`` for recorded lookups),
-# which the processor injects — the model never supplies them. Presenting the raw
+# Model-facing perception schemas. The native selection request models also carry
+# participant and absolute-time fields that the processor injects. Presenting the raw
 # generated schema would tell the model to fill a required ``participant_id`` it
 # cannot know and whose value is discarded, so the model sees these trimmed
 # contracts instead (the worker swaps them in for the native ones).
@@ -202,6 +203,7 @@ class SceneModelLoop:
         self._quick_ack_cache = self._quick_ack_path.read_text(encoding="utf-8").strip()
         self._still_work_cache = self._still_work_path.read_text(encoding="utf-8").strip()
         self._tools = model_tools
+        self._model_tool_names = {tool.name for tool in model_tools}
         self._llm = llm
         self._agent_llm = agent_llm
 
@@ -891,20 +893,23 @@ class SceneModelLoop:
     async def _look_at_current_frame(self, pid: str, question: str) -> dict:
         """Answer a live-camera question through the native perception tool.
 
-        The native live-vision tool acquires from the always-on frame source.
-        This adapter injects the active participant (which the model never
-        supplies) and raises
-        ``_PerceptionUnavailableError`` when no fresh frame or VLM answer is
-        available so the turn ends with a short spoken message rather than
-        looping or failing silently.
+        This adapter selects a frame, passes its reference to the VLM tool,
+        injects the active participant, and turns unavailable perception into
+        a short user-facing response.
         """
         if not pid:
             raise _PerceptionUnavailableError(_NO_FRAME_MSG)
         _trace_log.info("LOOK  {}", question[:120])
         try:
+            frame = await self._call_tool(
+                CURRENT_FRAME_TOOL,
+                {"participant_id": pid},
+            )
+            if not isinstance(frame, dict) or not isinstance(frame.get("image"), dict):
+                raise RuntimeError("current frame selection failed")
             result = await self._call_tool(
-                LIVE_PERCEPTION_TOOL,
-                {"participant_id": pid, "query": question},
+                IMAGE_QUERY_TOOL,
+                {"image": frame["image"], "query": question},
             )
         except Exception as exc:
             logger.exception("look_at_current_frame failed")
@@ -925,18 +930,27 @@ class SceneModelLoop:
         offset. A lookup failure is returned to the model as an error dict —
         unlike the live path, a missing recorded frame does not end the turn.
         """
-        result = await self._call_tool(
-            PAST_PERCEPTION_TOOL,
+        frame = await self._call_tool(
+            "get_historical_frame",
             {
                 "participant_id": pid,
+                "start_us": ref_us - int(args.get("second_ago", 0)) * 1_000_000,
+            },
+        )
+        if not isinstance(frame, dict) or not isinstance(frame.get("image"), dict):
+            return frame
+        result = await self._call_tool(
+            IMAGE_QUERY_TOOL,
+            {
+                "image": frame["image"],
                 "query": str(args.get("question") or "").strip(),
-                "second_ago": args.get("second_ago", 0),
-                "reference_time_us": ref_us,
             },
         )
         if isinstance(result, str):
             return {"answer": result}
         if isinstance(result, dict) and "text" in result:
+            if result.get("available") is False:
+                return {"error": result["text"]}
             return {"answer": result["text"]}
         return result
 
@@ -951,6 +965,8 @@ class SceneModelLoop:
         ref_us: int = 0,
     ) -> dict | str | None:
         """Invoke a native tool or a participant-aware perception path."""
+        if tool not in self._model_tool_names:
+            return {"error": f"Unknown model tool: {tool}"}
         # Live perception needs participant context that is not model supplied. Intercept
         # before _normalize_tool_args (which would strip the question text if
         # it ever produced an empty value) and before native invocation.
