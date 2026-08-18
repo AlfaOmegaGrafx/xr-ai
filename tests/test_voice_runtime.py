@@ -25,6 +25,7 @@ from xr_ai_voice import (
     VoiceAgent,
     VoiceInterrupted,
     VoiceOutput,
+    VoiceParticipantJoined,
     VoiceParticipantLeft,
     VoiceStreamClosedError,
     VoiceTranscript,
@@ -33,6 +34,7 @@ from xr_ai_voice import _runtime as voice_runtime_module
 from xr_ai_voice._types import VoiceQuery
 
 QUERY_TOPIC = Topic("test.user-query", UserQuery)
+PARTICIPANT_JOINED_TOPIC = Topic("test.participant-joined", VoiceParticipantJoined)
 PARTICIPANT_LEFT_TOPIC = Topic("test.participant-left", VoiceParticipantLeft)
 INTERRUPTED_TOPIC = Topic("test.interrupted", VoiceInterrupted)
 
@@ -186,6 +188,15 @@ class _LifecycleRecorder(Agent):
         self.events: list[tuple[str, str | None]] = []
         self.changed = asyncio.Event()
 
+    @subscribe(PARTICIPANT_JOINED_TOPIC)
+    async def participant_joined(
+        self,
+        _event: VoiceParticipantJoined,
+        ctx: RuntimeContext,
+    ) -> None:
+        self.events.append(("participant-joined", ctx.metadata.participant_id))
+        self.changed.set()
+
     @subscribe(PARTICIPANT_LEFT_TOPIC)
     async def participant_left(
         self,
@@ -208,6 +219,50 @@ class _LifecycleRecorder(Agent):
         while len(self.events) < count:
             self.changed.clear()
             await self.changed.wait()
+
+
+class _BlockingParticipantLifecycle(Agent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.participants: set[str] = set()
+        self.events: list[tuple[str, str]] = []
+        self.first_join_started = asyncio.Event()
+        self.release_first_join = asyncio.Event()
+        self.changed = asyncio.Event()
+        self._join_count = 0
+
+    @subscribe(PARTICIPANT_JOINED_TOPIC)
+    async def participant_joined(
+        self,
+        _event: VoiceParticipantJoined,
+        ctx: RuntimeContext,
+    ) -> None:
+        participant_id = ctx.metadata.participant_id
+        assert participant_id is not None
+        self._join_count += 1
+        if self._join_count == 1:
+            self.first_join_started.set()
+            await self.release_first_join.wait()
+        self.participants.add(participant_id)
+        self.events.append(("joined", participant_id))
+        self.changed.set()
+
+    @subscribe(PARTICIPANT_LEFT_TOPIC)
+    async def participant_left(
+        self,
+        _event: VoiceParticipantLeft,
+        ctx: RuntimeContext,
+    ) -> None:
+        participant_id = ctx.metadata.participant_id
+        assert participant_id is not None
+        self.participants.discard(participant_id)
+        self.events.append(("left", participant_id))
+        self.changed.set()
+
+    async def wait_for(self, count: int) -> None:
+        while len(self.events) < count:
+            await self.changed.wait()
+            self.changed.clear()
 
 
 class _BlockingLifecycle(Agent):
@@ -458,6 +513,7 @@ async def test_voice_agent_publishes_configured_lifecycle_topics() -> None:
     voice = _voice_agent(
         session,
         query_topic=QUERY_TOPIC,
+        participant_joined_topic=PARTICIPANT_JOINED_TOPIC,
         participant_left_topic=PARTICIPANT_LEFT_TOPIC,
         interrupted_topic=INTERRUPTED_TOPIC,
         text_input=False,
@@ -465,14 +521,16 @@ async def test_voice_agent_publishes_configured_lifecycle_topics() -> None:
     runtime.register("voice", voice)
 
     async with _running_voice(runtime, voice, session):
+        await session.run_options["on_participant_joined"]("alice")
         await session.run_options["on_participant_left"]("alice")
         assert session.run_options["on_interrupted"](None) is None
-        await asyncio.wait_for(recorder.wait_for(2), 1.0)
+        await asyncio.wait_for(recorder.wait_for(3), 1.0)
 
-    assert recorder.events == [
+    assert [event for event in recorder.events if event[0] != "interrupted"] == [
+        ("participant-joined", "alice"),
         ("participant-left", "alice"),
-        ("interrupted", None),
     ]
+    assert ("interrupted", None) in recorder.events
 
 
 async def test_voice_lifecycle_publication_does_not_block_media_callback() -> None:
@@ -493,6 +551,42 @@ async def test_voice_lifecycle_publication_does_not_block_media_callback() -> No
         await asyncio.wait_for(blocker.started.wait(), 1.0)
         assert voice._lifecycle_tasks  # noqa: SLF001
         blocker.release.set()
+
+
+async def test_participant_lifecycle_publications_preserve_order() -> None:
+    session = _Session()
+    recorder = _BlockingParticipantLifecycle()
+    runtime = AgentRuntime()
+    runtime.register("recorder", recorder)
+    voice = _voice_agent(
+        session,
+        query_topic=QUERY_TOPIC,
+        participant_joined_topic=PARTICIPANT_JOINED_TOPIC,
+        participant_left_topic=PARTICIPANT_LEFT_TOPIC,
+        text_input=False,
+    )
+    runtime.register("voice", voice)
+
+    async with _running_voice(runtime, voice, session):
+        joined = session.run_options["on_participant_joined"]
+        left = session.run_options["on_participant_left"]
+
+        await asyncio.wait_for(joined("alice"), 1.0)
+        await asyncio.wait_for(recorder.first_join_started.wait(), 1.0)
+        await asyncio.wait_for(left("alice"), 1.0)
+        await asyncio.wait_for(joined("alice"), 1.0)
+        await asyncio.sleep(0)
+        assert recorder.events == []
+
+        recorder.release_first_join.set()
+        await asyncio.wait_for(recorder.wait_for(3), 1.0)
+
+    assert recorder.events == [
+        ("joined", "alice"),
+        ("left", "alice"),
+        ("joined", "alice"),
+    ]
+    assert recorder.participants == {"alice"}
 
 
 async def test_replacement_query_publishes_interruption_before_query() -> None:
