@@ -312,12 +312,15 @@ export function renderBase(model) {
     if (!isConnected) {
       agentDot.className     = 'state-dot disconnected';
       agentLabel.textContent = '—';
+    } else if (model.agentStatus === 'loading') {
+      agentDot.className     = 'state-dot connecting';
+      agentLabel.textContent = 'Starting…';
     } else if (model.agentStatus === 'processing') {
       agentDot.className     = 'state-dot connecting';
       agentLabel.textContent = 'Processing…';
-    } else if (model.agentStatus === 'idle') {
+    } else if (model.agentStatus === 'ready' || model.agentStatus === 'idle') {
       agentDot.className     = 'state-dot connected';
-      agentLabel.textContent = 'Idle';
+      agentLabel.textContent = model.agentStatus === 'ready' ? 'Ready' : 'Idle';
     } else {
       agentDot.className     = 'state-dot disconnected';
       agentLabel.textContent = 'Unknown';
@@ -325,7 +328,6 @@ export function renderBase(model) {
   }
 
   // ── Data channel ───────────────────────────────────────────────────────────
-  $('ping-btn').disabled = !isConnected;
   $('send-btn').disabled = !isConnected || $('message-input').value.trim() === '';
 
   // ── Received messages ──────────────────────────────────────────────────────
@@ -548,13 +550,6 @@ export async function stopCamera(model, render, showError) {
   render();
 }
 
-/** @param {object} model */
-export async function sendPing(model) {
-  try {
-    await model.session?.send('ping');
-  } catch { /* ignore */ }
-}
-
 /** @param {object} model @param {string} text @param {(msg: string) => void} showError */
 export async function sendCustom(model, text, showError) {
   if (!text.trim()) return;
@@ -580,15 +575,11 @@ export async function sendCustom(model, text, showError) {
  *   stopAudio:   () => void,
  *   startCamera: () => void,
  *   stopCamera:  () => void,
- *   sendPing:    () => void,
  *   sendCustom:  (text: string) => void,
  * }} actions
  */
 export function wireBaseEvents(model, actions) {
-  const {
-    connect, disconnect, startAudio, stopAudio, startCamera, stopCamera,
-    sendPing, sendCustom,
-  } = actions;
+  const { connect, disconnect, startAudio, stopAudio, startCamera, stopCamera, sendCustom } = actions;
 
   $('host-input').addEventListener('input', (e) => { model.host = e.target.value; });
   $('port-input').addEventListener('input', (e) => { model.port = Number(e.target.value) || 8080; });
@@ -627,8 +618,6 @@ export function wireBaseEvents(model, actions) {
   $('camera-btn').addEventListener('click', () => {
     if (model.isCameraActive) stopCamera(); else startCamera();
   });
-
-  $('ping-btn').addEventListener('click', () => { sendPing(); });
 
   const msgInput = $('message-input');
   msgInput.addEventListener('input', () => {

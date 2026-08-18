@@ -6,29 +6,23 @@
 # xr-ai-models
 
 Unified service protocols and OpenAI-compatible HTTP clients for the xr-ai
-model layer.  Worker code depends on the four protocols
-(`LLMService`, `VLMService`, `STTService`, `TTSService`) and constructs
-concrete clients from a `models.yaml` config — no hand-rolled httpx calls
+model layer. Worker code depends on the typed protocols `LLMService`,
+`VLMService`, `STTService`, `TTSService`, and `EmbeddingService`, and constructs
+concrete clients from a model deployment profile — no hand-rolled httpx calls
 in callers, no model quirks leaking out of this package.
 
-## Why
+## Contract
 
-Before this package, every consumer (vlm-mcp, simple-vlm-example worker,
-xr-render-demo worker, xr-ai-pipecat) rolled its own httpx wrappers and
-hard-coded model quirks (`chat_template_kwargs`, served-model-name strings,
-the `reasoning` vs `reasoning_content` field difference between
-nano_v3 and nemotron_v3 parsers).  Swapping an LLM meant editing N files.
-
-After: one `models.yaml` per sample names the logical models the worker
-needs; `make_llm(config, "agent_llm")` returns something that satisfies
-`LLMService` regardless of which backend or quirks are involved.
+Model profiles name logical roles and keep endpoint and model-specific behavior
+inside this package. Callers depend on the typed protocol and can change models
+through configuration.
 
 ## Quickstart
 
 ```python
 from xr_ai_models import load_models_config, make_llm, ChatMessage
 
-config = load_models_config("yaml/models.yaml")
+config = load_models_config("yaml/models.local.json")
 async with make_llm(config, "agent_llm") as llm:
     resp = await llm.chat(
         [ChatMessage(role="user", content="hello")],
@@ -38,115 +32,151 @@ async with make_llm(config, "agent_llm") as llm:
     print(resp.content, resp.reasoning)
 ```
 
-`models.yaml`:
+`models.local.json`:
 
-```yaml
-agent_llm:
-  kind:     preset:nemotron3_nano
-  base_url: http://localhost:8107
-
-vlm:
-  kind:     preset:cosmos_vlm
-  base_url: http://localhost:8100
-
-stt:
-  kind:     preset:parakeet_stt
-  base_url: http://localhost:8103
-
-tts:
-  kind:     preset:piper_tts
-  base_url: http://localhost:8105
+```json
+{
+  "models": {
+    "agent_llm": {
+      "category": "llm",
+      "adapter": {"preset": "nemotron_omni"},
+      "endpoint": {"base_url": "http://localhost:8108", "readiness": "health"},
+      "deployment": {"ownership": "reused", "service": "omni"}
+    }
+  }
+}
 ```
 
 Built-in presets — see `xr_ai_models/presets/`:
 
 | Preset | Service it targets | Notes |
 |---|---|---|
-| `cosmos_vlm`     | vlm-server               | image + video; `enable_thinking=false` by default. Video requires vlm-server's `max_videos_per_prompt >= 1` |
+| `cosmos3_nano_reasoner` | vlm-server          | default; Cosmos3 Nano text-output Reasoner, image + video; video requires `max_videos_per_prompt >= 1` |
+| `cosmos_vlm`     | vlm-server               | Cosmos-Reason1 compatibility option; image + video; `enable_thinking=false` by default; video requires `max_videos_per_prompt >= 1` |
 | `llama_nemotron` | llama-nemotron-llm-server | OpenAI tool calling via llama3_json (server-side) |
 | `nemotron3_nano` | nemotron3-nano-llm-server | reasoning field: `reasoning` |
-| `nemotron_omni`  | nemotron-omni-llm-server  | reasoning field: `reasoning_content`, vision + video |
+| `nemotron_omni`  | nemotron-omni-llm-server  | default LLM; reasoning field: `reasoning_content`, thinking off unless requested, vision + video |
+| `nemotron_embedding` | embedding-server | OpenAI-compatible dense embeddings |
 | `parakeet_stt`   | stt-server               | |
 | `piper_tts`      | tts/piper                | |
 | `magpie_tts`     | tts/magpie               | |
 
-## Explicit (no-preset) spec
+## Profile contract
 
-```yaml
-agent_llm:
-  kind:       openai_compat
-  category:   llm
-  base_url:   http://localhost:8107
-  model_name: llm
-  capabilities: { tool_calls: true, reasoning: true }
-  reasoning_field: reasoning
-  default_extras:
-    chat_template_kwargs: { enable_thinking: false }
-  timeout: 60.0
+```json
+{
+  "models": {
+    "agent_llm": {
+      "category": "llm",
+      "adapter": {
+        "kind": "openai_compat",
+        "model_name": "llm",
+        "capabilities": {"tool_calls": true, "reasoning": true},
+        "reasoning_field": "reasoning"
+      },
+      "endpoint": {
+        "base_url": "http://localhost:8107",
+        "timeout": 60.0,
+        "readiness": "health"
+      },
+      "deployment": {"ownership": "reused", "service": "agent-llm"}
+    }
+  }
+}
 ```
 
-`category:` is required when not using a preset.
+`category` selects the service protocol. `adapter` owns model and wire quirks;
+`endpoint` owns connectivity, environment-based credentials, timeouts, and
+readiness; `deployment` tells a launcher whether the service is `managed`,
+`reused`, or `external`.
+
+Profiles may be JSON or YAML. The loader also accepts a direct role mapping,
+flat entries, `health_check: true|false`, and `kind: preset:<name>` for
+backward compatibility. The public role-spec classes also retain their legacy
+flat positional and keyword constructors and expose flat fields as read-only
+properties.
+
+## Deployment profiles
+
+A profile may separate model behavior, endpoint connectivity, and process
+ownership. The existing flat YAML format remains supported for workers. A
+profile shared with the stdlib-only launcher must be wrapped in `models`, use
+the nested shape below, and be JSON so both consumers read the same file.
+
+```json
+{
+  "models": {
+    "agent_llm": {
+      "adapter": {"preset": "nemotron3_nano"},
+      "endpoint": {"base_url": "http://localhost:8107", "readiness": "health"},
+      "deployment": {"ownership": "reused", "service": "agent-llm"}
+    }
+  }
+}
+```
+
+Workers pass the profile to `load_models_config()` as usual. A stdlib-only
+orchestrator can call `load_model_deployment(worker_config)` from
+`xr-ai-launcher` to map `managed` to `launch_mode="own"`, `reused` to
+`launch_mode="reuse"`, and `external` to no local process. Credentials used by
+the launcher must be declared explicitly as `endpoint.api_key_env`; launcher
+profiles do not inherit credentials from adapter presets.
+
+The launcher validates the `.json` suffix before reading a profile; selecting a
+YAML profile is supported only for worker-side `xr-ai-models` loading. Model
+roles compose `AdapterSpec`, `EndpointSpec`, and `DeploymentSpec`, while their
+legacy flat attributes remain available as read-only compatibility aliases.
+The simple VLM sample provides complete local and hosted profiles.
 
 ## Protocols
 
-```python
-class LLMService(Protocol):
-    capabilities: Capabilities
-    async def chat(self, messages, *, tools=None, max_tokens=None,
-                   temperature=None, enable_thinking=False,
-                   thinking_budget=None, timeout=None) -> ChatResponse: ...
-    def stream(self, messages, *, ...) -> AsyncIterator[str]: ...
-    async def health(self) -> bool: ...
-    async def close(self) -> None: ...
-
-class VLMService(Protocol):
-    capabilities: Capabilities
-    async def ask_image(self, image, question, *, system_prompt="",
-                        max_tokens=None, temperature=None,
-                        timeout=None) -> ChatResponse: ...
-    async def ask_video(self, video, question, *, system_prompt="",
-                        max_tokens=None, temperature=None,
-                        timeout=None) -> ChatResponse: ...
-    async def health(self) -> bool: ...
-
-class STTService(Protocol):
-    async def transcribe(self, audio: bytes, *, sample_rate=None,
-                         channels=1, timeout=None) -> str: ...
-    async def health(self) -> bool: ...
-
-class TTSService(Protocol):
-    async def synthesize(self, text: str, *, response_format="wav",
-                         timeout=None) -> bytes: ...
-    async def health(self) -> bool: ...
-```
+The versioned documentation site generates exact protocol methods, parameters,
+types, and defaults from the public Python declarations. This README keeps only
+the behavioral rules that span multiple calls or implementations.
 
 `ChatResponse.reasoning` is the canonical reasoning field — the
 `reasoning_field` knob normalizes `reasoning_content` (nemotron_v3 parser)
 into the same surface.
 
+`LLMService` and `VLMService` request methods accept optional string-valued
+per-call headers for execution context such as Relay session lineage. The model
+profile remains the authority for credentials: callers cannot supply an
+`Authorization` header.
+
+`ask_image()` and `stream()` are one-image wrappers over `ask_images()` and
+`stream_images()`. Multi-image calls preserve caller order and place every
+image in one OpenAI-compatible user message before the question.
+
 ## Remote / hosted-NIM endpoints
 
 Cloud / remote endpoints (e.g. hosted [NVIDIA NIM](https://build.nvidia.com))
-are a config change — point `base_url` at the OpenAI-compatible URL and set:
+are a profile change:
 
-```yaml
-vlm:
-  kind:        openai_compat
-  category:    vlm
-  base_url:    https://integrate.api.nvidia.com
-  model_name:  nvidia/cosmos-reason1-7b
-  api_key_env: NGC_API_KEY    # → Authorization: Bearer <env value>
-  health_check: false         # remote endpoints have no local /health route
+```json
+{
+  "models": {
+    "vlm": {
+      "category": "vlm",
+      "adapter": {
+        "kind": "openai_compat",
+        "model_name": "nvidia/cosmos3-nano-reasoner"
+      },
+      "endpoint": {
+        "base_url": "https://integrate.api.nvidia.com",
+        "api_key_env": "NGC_API_KEY",
+        "readiness": "none"
+      },
+      "deployment": {"ownership": "external"}
+    }
+  }
+}
 ```
 
-`health_check` (default `true`) gates whether `health()` probes
-`base_url/health`. Remote endpoints don't expose it, so `false` makes
+`readiness: health` makes `health()` probe `base_url/health`. Remote endpoints
+without that route use `readiness: none`, which makes
 `health()` return `True` without a request — otherwise a worker's readiness
 gate would block forever. See
-[`docs/ai-services.md`](../../docs/ai-services.md#hosting-models-on-nvidia-nim).
-
-Future non-OpenAI-compat backends (LiteLLM, vendor SDKs) plug in as new
-`kind`s in `factory.py::make_*`; the protocols and callers do not change.
+`docs/source/components/ai-services.md` for hosted endpoint operation.
 
 ## Tests
 

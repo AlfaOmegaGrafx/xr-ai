@@ -160,6 +160,9 @@ struct ContentView: View {
 
             audioRow
             cameraRow
+            #if os(visionOS)
+            xrRow
+            #endif
         }
     }
 
@@ -183,12 +186,12 @@ struct ContentView: View {
                     .foregroundStyle(model.isAudioActive ? .green : .secondary)
                 if model.isAudioActive {
                     Button("Stop", role: .destructive) {
-                        Task { await model.stopAudio() }
+                        Task { await model.disableMic() }
                     }
                     .buttonStyle(.bordered)
                 } else {
                     Button("Start") {
-                        Task { await model.startAudio() }
+                        Task { await model.enableMic() }
                     }
                     .buttonStyle(.bordered)
                     .disabled(!isConnected || model.isAudioStarting)
@@ -256,16 +259,70 @@ struct ContentView: View {
         return model.connectionState == .connected ? "Idle" : "Not connected"
     }
 
+    #if os(visionOS)
+    @ViewBuilder
+    private var xrRow: some View {
+        LabeledContent("XR Stream") {
+            HStack {
+                Text(xrStatusText)
+                    .foregroundStyle(xrStatusColor)
+                xrButton
+            }
+        }
+    }
+
+    private var xrStatusText: String {
+        switch model.xrState {
+        case .idle:        return "Idle"
+        case .connecting:  return "Connecting…"
+        case .streaming:   return "Streaming"
+        case .stopping:    return "Stopping…"
+        case .error(let reason): return "Error: \(reason)"
+        }
+    }
+
+    private var xrStatusColor: Color {
+        switch model.xrState {
+        case .streaming: return .green
+        case .error:     return .red
+        default:         return .secondary
+        }
+    }
+
+    @ViewBuilder
+    private var xrButton: some View {
+        switch model.xrState {
+        case .idle, .error:
+            Button("Launch XR") {
+                Task {
+                    if !model.immersiveSpaceIsOpen {
+                        let result = await openImmersiveSpace(id: AppModel.immersiveSpaceID)
+                        guard case .opened = result else {
+                            model.lastError = "Couldn’t open the immersive space."
+                            return
+                        }
+                    }
+                    await model.startXR()
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.connectionState != .connected || model.host.isEmpty)
+
+        case .connecting, .streaming, .stopping:
+            Button("Stop", role: .destructive) {
+                Task { await model.stopXR() }
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.xrState == .stopping)
+        }
+    }
+    #endif
+
     // MARK: - Data section
 
     @ViewBuilder
     private var dataSection: some View {
         Section("Data Channel") {
-            Button("Send Ping") {
-                Task { await model.sendPing() }
-            }
-            .disabled(model.connectionState != .connected)
-
             HStack {
                 TextField("Custom message…", text: $sendText)
                     .autocorrectionDisabled()
@@ -514,7 +571,7 @@ private struct ErrorToast: View {
 
 // MARK: - CameraConfig.Position + CaseIterable
 
-extension CameraConfig.Position: CaseIterable {
+extension CameraConfig.Position: @retroactive CaseIterable {
     public static var allCases: [CameraConfig.Position] { [.back, .front] }
 
     var displayName: String {

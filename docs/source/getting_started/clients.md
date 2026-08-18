@@ -88,6 +88,10 @@ To connect:
    directly.
 4. Click **Connect**. You are now live in the XR session.
 
+The camera preview displays the same browser track published to the hub and
+adapts to its captured aspect ratio. The browser console logs the published
+track settings when the camera starts.
+
 ## Web-XR (XR render demo)
 
 The XR render demo client lives in `client-samples/web-xr/`. Unlike the basic
@@ -195,10 +199,6 @@ Android XR hardware or the emulator, and two areas are expected to need work:
   immersive APIs (Jetpack XR, OpenXR, spatial panels, head tracking, hand input,
   or passthrough), so it will not render head-tracked or spatialized content.
 ```
-
-A fully immersive Android XR client — spatialized UI, head and hand input, and
-optional CloudXR remote rendering — is future work. For an immersive XR path
-today, refer to the **Web-XR (XR render demo)** client described above.
 
 ## iOS/visionOS
 

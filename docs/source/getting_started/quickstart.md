@@ -12,10 +12,22 @@ on startup.
 
 ## Model servers (shared AI services)
 
-`model-servers` starts the four inference services used across demos and exits
+`model-servers` starts the shared inference services used across demos and exits
 immediately — the services keep running in the background with weights hot.
 Start this once before running `xr-render-demo`, or whenever you want to
 pre-warm models:
+
+:::{important}
+After updating, stop any existing model servers before starting this stack:
+
+```bash
+uv run model_servers --stop
+```
+
+Persisted vLLM processes or containers may otherwise keep serving the previous
+models and images even though the checked-in configuration now selects
+Nemotron-3 Nano Omni and Cosmos3 Nano Reasoner.
+:::
 
 ```bash
 cd agent-samples/model-servers
@@ -26,13 +38,17 @@ uv run model_servers
 GPU profiles are auto-detected (`dual_48G_ada`, `spark`, `96G_blackwell`). These
 are presets for common configurations; to run on a different GPU, refer to
 {doc}`Running on other GPUs </getting_started/requirements>`.
-On first run each model downloads from HuggingFace (~50 GB total; can take
+On first run each model downloads from HuggingFace (tens of GB; can take
 tens of minutes). On subsequent runs the containers restart in under a minute.
 
-The default models are public, so no HuggingFace token is required. Set
-`HF_TOKEN` to lift download rate limits and speed, or to use a gated model: refer
-to the credentials guide. The launcher won't prompt; it prints a one-line notice
-and continues if the token is unset.
+The stack starts Nemotron-3 Nano Omni for LLM requests (8108), Cosmos3 Nano
+Reasoner for vision requests (8100), STT (8103), and embeddings (8109).
+Starting it stops the superseded Nano text server on port 8107 first.
+
+`HF_TOKEN` is required by default: without it the large first-run download
+can stall indefinitely. Refer to the
+{doc}`credentials guide </getting_started/credentials>` for how to set it, or
+pass `--allow-anonymous` to run without one.
 
 To stop all model servers when done:
 
@@ -40,14 +56,16 @@ To stop all model servers when done:
 uv run model_servers --stop
 ```
 
+`--stop` stops every persisted model service in the shared topology.
+
 ## Simple VLM example (vision Q&A over voice + text)
 
-End-to-end voice + vision sample. Speak into the mic, type into the data
-channel, or send the literal text `"ping"` — all routes go through the same VLM
-pipeline against the latest video frame. Replies arrive as streaming Piper TTS
-audio plus a `vlm.response` text message.
+End-to-end voice + vision sample. Speak into the mic or type into the data
+channel; both routes use the same VLM pipeline against the latest video frame.
+Replies arrive as streaming Piper TTS audio plus a `vlm.response` text message.
 
-Uses `nvidia/Cosmos-Reason1-7B` (NVIDIA Open Model License + Apache 2.0).
+Uses the text-output Reasoner from `nvidia/Cosmos3-Nano` by default. Refer to
+{doc}`AI services </components/ai-services>` for runtime-selection details.
 
 There are two ways to run it:
 
@@ -60,14 +78,14 @@ uv sync
 uv run simple_vlm_example
 ```
 
-On the very first run weights download from HuggingFace (~23 GB; can take
-several minutes). The default model is public — no HuggingFace token needed; set
-`HF_TOKEN` only to lift rate limits and speed or for a gated model (refer to the
-credentials guide).
+On the very first run weights download from HuggingFace (tens of GB; can take
+several minutes). `HF_TOKEN` is required by default; pass `--allow-anonymous`
+to run without one (refer to the
+{doc}`credentials guide </getting_started/credentials>`).
 
-**With model-servers pre-running** — if VLM (port 8100) and STT (port 8103) are
-already up from `model-servers`, the demo detects them at startup and reuses
-them. No extra flags needed. When you exit, those services keep running.
+**With model-servers pre-running** — start `model_servers` to pre-warm VLM
+(port 8100) and STT (port 8103). The demo detects and reuses them.
+When you exit, those services keep running.
 
 ### Step 1 — Start the server
 
@@ -99,7 +117,6 @@ automatically. Click **Connect**.
 
 You are now live in the XR session. To test the agent:
 
-- Type `ping` in the data channel → the agent describes what the camera sees.
 - Type any question → sent verbatim to the VLM.
 - Speak into your mic → speech is transcribed and sent as a query.
 
@@ -109,43 +126,45 @@ a moment, and you hear the reply through your speakers.
 **Local model** — override the model weights or GPU settings by editing
 `vlm_server.yaml` in the sample directory.
 
-**Remote model** — create a models overlay that points the VLM at your remote
-endpoint, then tell the worker to use it:
+To use Cosmos-Reason1 instead, set `model: nvidia/Cosmos-Reason1-7B` in that
+file and select `cosmos_vlm` as the VLM adapter preset in `models.local.json`.
 
-```yaml
-# yaml/models.custom.yaml — overlay for a remote VLM endpoint
-vlm:
-  kind:     preset:cosmos_vlm
-  base_url: https://your-remote-vlm.example.com
+**Remote model** — copy `yaml/models.hosted.json`, point its VLM endpoint at
+your server, and select it in the worker config:
+
+```json
+{
+  "endpoint": {"base_url": "https://your-remote-vlm.example.com"},
+  "deployment": {"ownership": "external"}
+}
 ```
 
 ```yaml
-# yaml/simple_vlm_example_worker.yaml — point the worker at the overlay
-models_yaml: yaml/models.custom.yaml
+# yaml/simple_vlm_example_worker.yaml
+models_config: models.remote.json
 ```
 
-When pointing at a remote model, `vlm_server.yaml` is unused — remove the
-`vlm_server` entry from the launcher's process list so no local vLLM process is
-started.
+The external deployment declaration makes the orchestrator skip the local VLM
+process automatically.
 
 **Hosted NVIDIA NIM** — run the VLM on hosted NIM
 ([build.nvidia.com](https://build.nvidia.com)) instead of locally (STT/TTS stay
 local) by setting **one key** in `simple_vlm_example_worker.yaml`:
 
 ```yaml
-model_backend: nim     # default is "local"
+models_config: models.hosted.json
 ```
 
-The worker then loads the ready-made `yaml/models.nim.yaml` overlay and the
-orchestrator skips the local vlm-server automatically. Pick
-the hosted model id in `models.nim.yaml` and provide an `NGC_API_KEY` as an
+The same profile configures the worker and makes the orchestrator skip the
+local VLM server. Pick the hosted model id in `models.hosted.json` and provide
+an `NGC_API_KEY` as an
 **environment variable** (or save it once via the launcher credential prompt) —
 it is not stored in YAML; the overlay only names the env var via
 `api_key_env: NGC_API_KEY`. Refer to the credentials and AI-services guides for
 full details (and self-hosted NIM containers).
 
 Each sample has its own `xr_media_hub.yaml` controlling the hub; refer to
-`server-runtime/xr_media_hub.yaml` for the full option list.
+`services/xr-media-hub/xr_media_hub.yaml` for the full option list.
 
 ## XR render demo (voice-driven sphere in CloudXR)
 
@@ -155,11 +174,11 @@ red", "put it to my left", "where I'm looking"). Runs against a Quest 3 or Visio
 Pro on the same LAN, or the IWER emulator built into the web client for desktop
 dev.
 
-Under the hood, the orchestrator launches twelve concurrent processes — hub,
-CloudXR runtime, STT, TTS, VLM, two LLM servers, four MCP servers, and the
-worker — wired together by a Pipecat pipeline that pairs a fast Llama-8B for
-quick-acks with a Nemotron-30B agentic tool-calling loop over `render-mcp`,
-`oxr-mcp`, `vlm-mcp`, and `video-mcp`. Refer to the xr-render-demo guide for the
+Under the hood, the orchestrator launches the hub, CloudXR runtime, model
+endpoints, typed capability processes, and the worker. The worker calls those
+processes through Relay-managed native tools. The voice runtime runs quick-acks
+and a Nemotron-30B agentic tool-calling loop over scene, tracking,
+spatial math, vision, and video-memory tools. Refer to the xr-render-demo guide for the
 full process map, agentic-loop details, and the XR session lifecycle.
 
 **Requires `model-servers` to be running first** — the demo does not start its
@@ -172,7 +191,7 @@ cd agent-samples/model-servers
 uv sync && uv run model_servers
 ```
 
-This exits immediately once all four services are ready. Weights stay loaded in
+This exits immediately once all configured services are ready. Weights stay loaded in
 the background.
 
 ### Step 2 — Start the demo
@@ -191,7 +210,7 @@ uv sync
 uv run xr_render_demo
 ```
 
-On first run the orchestrator automatically downloads LOVR v0.18.0 to
+On first run the orchestrator automatically downloads the pinned LOVR version to
 `deps/lovr/` inside the repository and builds the web vendor bundle (requires npm
 and network access). Both steps are skipped on subsequent runs.
 
@@ -204,14 +223,14 @@ binary, so the auto-download is not available: build LOVR from source and export
 To use a custom LOVR build:
 
 ```bash
-export LOVR_BIN=/path/to/your/lovr   # or set lovr_bin: in render_mcp.yaml
+export LOVR_BIN=/path/to/your/lovr   # or set lovr_bin: in scene/scene_service.yaml
 uv run xr_render_demo
 ```
 
 **GPU pinning** for the XR side is controlled by `gpu_index` in
 `agent-samples/xr-render-demo/yaml/cloudxr_runtime.yaml`. cloudxr-runtime applies
 the pin to its own process and writes the selectors into `cloudxr.env`;
-render-mcp (and LOVR) inherit from that file. Refer to the xr-render-demo guide
+the scene process and LOVR inherit from that file. Refer to the xr-render-demo guide
 for full details.
 
 To stop the model servers when done:
@@ -229,19 +248,29 @@ stay local) by setting **one key** in `xr_render_demo_worker.yaml`:
 model_backend: nim     # default is "local"
 ```
 
-The worker loads `yaml/models.nim.yaml` and the orchestrator points `vlm-mcp` at
-`yaml/vlm_mcp_server.nim.yaml` automatically. Provide an
-`NGC_API_KEY` as an **environment variable** (or via the launcher credential
-prompt — not in YAML) and just don't start the local `llm` / `agent-llm` / `vlm`
-model-servers. Refer to the AI-services guide.
-
-## Hub only (server-runtime standalone)
+The worker loads `yaml/models.nim.yaml` for native model-backed Functions.
+Provide an `NGC_API_KEY` as an **environment variable** (or via the launcher
+credential prompt — not in YAML). Do not run `model_servers`, because its
+single topology starts both local `omni` and `vlm`. Start STT by itself from
+the repository root, setting `GPU_PROFILE` to `dual_48G_ada`, `spark`, or
+`96G_blackwell`:
 
 ```bash
-cd server-runtime
+GPU_PROFILE=dual_48G_ada
+uv run --project services/stt-server stt_server \
+  --config "agent-samples/model-servers/yaml/${GPU_PROFILE}/stt_server.yaml"
+```
+
+Then start `xr_render_demo` in another terminal. Refer to the AI-services
+guide.
+
+## Hub only (standalone)
+
+```bash
+cd services/xr-media-hub
 uv sync
 uv run xr_media_hub
 ```
 
 Useful for development or when running an agent in a separate terminal. The
-XR-Media-Hub auto-discovers `server-runtime/xr_media_hub.yaml`.
+XR-Media-Hub auto-discovers `services/xr-media-hub/xr_media_hub.yaml`.

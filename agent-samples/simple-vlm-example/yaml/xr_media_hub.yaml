@@ -3,9 +3,10 @@
 
 # XR Media Hub configuration for the vlm-agent sample.
 # Paths are relative to this file's directory.
-# See server-runtime/xr_media_hub.yaml for all available options.
+# See services/xr-media-hub/xr_media_hub.yaml for all available options.
 
 # ── LiveKit server ────────────────────────────────────────────────────────────
+# Development-only placeholders. Replace both values outside local samples.
 api_key:    devkey
 api_secret: devsecret-xr-livekit-prototype-2026
 room_name:  xr-room
@@ -14,6 +15,11 @@ lk_port_ws:  7880
 lk_port_tcp: 7881
 lk_port_udp: 7882
 
+# Cloud VMs behind NAT may need STUN-based public-IP discovery. Also skip
+# validation when the NAT does not support LiveKit's public-IP self-ping.
+# lk_use_external_ip: true
+# lk_skip_external_ip_validation: true
+
 # ── Web client server ─────────────────────────────────────────────────────────
 enable_web_server: true
 web_server_port:   8080
@@ -21,3 +27,6 @@ web_client_dir:    ../../../client-samples/web
 
 # ── Optional: token server ────────────────────────────────────────────────────
 enable_token_server: true
+# Change if another service holds port 8000 (e.g. iphlpsvc under WSL2 mirrored
+# networking; see the note in services/xr-media-hub/xr_media_hub.yaml).
+# token_server_port: 8000

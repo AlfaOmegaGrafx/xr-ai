@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for xr_ai_agent._codec (encode/decode round-trips) and _types."""
+"""Unit tests for xr_ai_hub._codec (encode/decode round-trips) and _types."""
 from __future__ import annotations
 
 import pytest
 
-from xr_ai_agent._codec import decode, encode
-from xr_ai_agent._types import (
+from xr_ai_hub._codec import decode, encode
+from xr_ai_hub._types import (
     AudioChunk,
     ConnectorRegistration,
     ControlMessage,
@@ -87,7 +87,6 @@ class TestTypeIdPreservation:
     def test_roster_request_type_id(self):
         msg = RosterRequest()
         assert rt_type_id(MsgType.ROSTER_REQUEST, msg) == MsgType.ROSTER_REQUEST
-
 
 # ── payload field round-trips ──────────────────────────────────────────────────
 
@@ -251,7 +250,7 @@ class TestReturnAudioFlushCodec:
 
 
 class TestRosterRequestCodec:
-    def test_roundtrip_produces_instance(self):
+    def test_roundtrip_preserves_empty_payload(self):
         orig = RosterRequest()
         out = rt(MsgType.ROSTER_REQUEST, orig)
         assert isinstance(out, RosterRequest)
@@ -273,8 +272,7 @@ class TestWireFormat:
         assert isinstance(encode(MsgType.ROSTER_REQUEST, msg), bytes)
 
     def test_minimum_wire_length(self):
-        """Even the smallest message (RosterRequest, empty payload) must have
-        at least 1 byte for the type header."""
+        """Every encoded message includes at least its one-byte type header."""
         wire = encode(MsgType.ROSTER_REQUEST, RosterRequest())
         assert len(wire) >= 1
 
@@ -282,7 +280,7 @@ class TestWireFormat:
         """A byte sequence with an unregistered type_id must raise KeyError."""
         import msgpack
 
-        from xr_ai_agent._codec import _decoders
+        from xr_ai_hub._codec import _decoders
 
         # Pick the first unused type_id dynamically so this test stays valid
         # if 255 is ever registered.

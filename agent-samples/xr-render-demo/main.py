@@ -8,16 +8,16 @@ Architecture (per AGENTS.md + the Agentic AI for XR design doc):
 
   Web client ── LiveKit ──► xr-media-hub ──IPC──► worker (this sample's agent)
   Web client ── WebRTC ──► cloudxr-runtime
-                                            worker ──ZMQ──► render-mcp ──► LOVR (OpenXR)
+                        worker ──native tool──► scene ──► LOVR (OpenXR)
 
 The worker consumes audio from the hub, computes a sphere radius from voice
-loudness, and pushes a render command to render-mcp. render-mcp owns the LOVR
-child process and forwards render commands to it. CloudXR runs alongside as
+loudness, and invokes sample-local native scene tools. The sample-local
+scene process owns LOVR and scene state. CloudXR runs alongside as
 its own stream — neither stack passes through the other.
 
 Prerequisites
 -------------
-The four AI inference servers must be running before this demo starts:
+The shared AI inference servers must be running before this demo starts:
 
     uv run --project agent-samples/model-servers model_servers
 
@@ -25,11 +25,13 @@ How to run (from the repo root or any directory):
     uv run --project agent-samples/xr-render-demo xr_render_demo
 
 On first run the orchestrator auto-downloads LOVR v0.18.0 to deps/lovr/ inside
-the repo and builds the web vendor bundle (requires npm + network). Both steps
-are skipped once the outputs exist.
+the repo and, for WebRTC device profiles, builds the web vendor bundle
+(requires npm + network). Native CloudXR profiles never load the web page, so
+the vendor build is skipped and the hub serves only its signaling endpoints.
+Both steps are skipped once their outputs exist.
 
 To use a custom LOVR build instead of the auto-downloaded one:
-    export LOVR_BIN=/path/to/your/lovr      # or set lovr_bin: in render_mcp.yaml
+    export LOVR_BIN=/path/to/your/lovr      # or set lovr_bin: in scene/scene_service.yaml
 
 Then open https://<host>:8080, click "Start Mic", click "Launch XR" (or the
 WebXR DevUI on desktop). Speak; the sphere tracks your voice in the headset.
@@ -46,16 +48,26 @@ import urllib.request
 from pathlib import Path
 
 from loguru import logger
-from xr_ai_launcher import Process, ensure_credentials, run_stack
+from xr_ai_launcher import (
+    Process,
+    ensure_credentials,
+    is_native_profile,
+    read_device_profile,
+    run_stack,
+)
 from xr_ai_logging import setup_logging
 
 _BASE = Path(__file__).resolve().parent
 
 _WORKER_CONFIG = "yaml/xr_render_demo_worker.yaml"
+_CLOUDXR_CONFIG = "yaml/cloudxr_runtime.yaml"
 
 # Read the model_backend scalar from the worker YAML without pyyaml — the
 # orchestrator is stdlib-only (mirrors the lovr_bin regex read below).
 _BACKEND_RE = re.compile(r"^\s*model_backend\s*:\s*[\"']?(\w+)[\"']?", re.MULTILINE)
+
+# Must match _config_loader.NO_WEB_CLIENT_ENV.
+_NO_WEB_CLIENT_ENV = "XR_MEDIA_HUB_NO_WEB_CLIENT"
 
 
 def _model_backend() -> str:
@@ -74,41 +86,31 @@ def _model_backend() -> str:
 #   uv run --project agent-samples/model-servers model_servers
 #
 # With model_backend: nim (in xr_render_demo_worker.yaml) the worker loads
-# models.nim.yaml and vlm-mcp is pointed at vlm_mcp_server.nim.yaml here
-# automatically — run LLM/VLM on hosted NIM and just don't start the local
-# llm / agent-llm / vlm model-servers. STT/TTS stay local. See
-# docs/ai-services.md "Hosting models on NVIDIA NIM".
-def _build_processes(backend: str) -> list[Process]:
-    # The worker reaches the VLM through vlm-mcp, so vlm-mcp must use the same
-    # backend as the worker's models config.
-    vlm_mcp_config = (
-        "yaml/vlm_mcp_server.nim.yaml" if backend == "nim"
-        else "yaml/vlm_mcp_server.yaml"
-    )
+# models.nim.yaml automatically. Do not run model_servers because it starts
+# local Omni and Cosmos; start only STT separately. The demo starts local TTS.
+# See
+# docs/source/components/ai-services.md "Hosting models on NVIDIA NIM".
+def _build_processes() -> list[Process]:
     return [
-        Process("stt",       "../../ai-services/stt-server",         "stt_server",
+        Process("stt",       "../../services/stt-server",            "stt_server",
                 launch_mode="reuse"),
-        Process("agent-llm", "../../ai-services/llm/nemotron3_nano", "nemotron3_nano_llm_server",
+        Process("omni",      "../../services/nemotron-omni-llm",    "nemotron_omni_llm_server",
                 launch_mode="reuse"),
-        Process("vlm",       "../../ai-services/vlm-server",         "vlm_server",
+        Process("vlm",       "../../services/vlm-server",            "vlm_server",
                 launch_mode="reuse"),
-        Process("llm",       "../../ai-services/llm/llama_nemotron",  "llama_nemotron_llm_server",
-                launch_mode="reuse"),
-        Process("hub",        "../../server-runtime",                "xr_media_hub",
+        Process("hub",        "../../services/xr-media-hub",                "xr_media_hub",
                 config="yaml/xr_media_hub.yaml"),
-        Process("cloudxr",    "../../cloudxr-runtime",               "cloudxr_runtime",
+        Process("cloudxr",    "../../services/cloudxr-runtime",      "cloudxr_runtime",
                 config="yaml/cloudxr_runtime.yaml"),
-        Process("tts",        "../../ai-services/tts/piper",         "piper_tts_server",
+        Process("tts",        "../../services/piper-tts",            "piper_tts_server",
                 config="yaml/piper_tts_server.yaml"),
-        Process("vlm-mcp",    "../../agent-mcp-servers/vlm-mcp",     "vlm_mcp_server",
-                config=vlm_mcp_config),
-        Process("video-mcp",  "../../agent-mcp-servers/video-mcp",   "video_mcp_server",
-                config="yaml/video_mcp_server.yaml"),
-        Process("render-mcp", "../../agent-mcp-servers/render-mcp",  "render_mcp"),
-        Process("oxr-mcp",    "../../agent-mcp-servers/oxr-mcp",     "oxr_mcp_server",
-                config="yaml/oxr_mcp_server.yaml",
+        Process("video-memory", "../../services/video-memory-service", "video_memory_service",
+                config="yaml/video_memory_service.yaml"),
+        Process("scene",      "scene",                                "xr_render_scene",
+                config="scene/scene_service.yaml"),
+        Process("openxr-service", "../../services/openxr-service",  "openxr_service",
+                config="yaml/openxr_service.yaml",
                 quiet_native_output=True),
-        Process("vec-mcp",    "../../agent-mcp-servers/vec-mcp",     "vec_mcp_server"),
         Process("worker",     "worker",                              "xr_render_demo_worker",
                 config=_WORKER_CONFIG),
     ]
@@ -148,18 +150,18 @@ def _ensure_lovr_bin() -> None:
 
     Resolution order:
       1. $LOVR_BIN env var (already set by caller or shell)
-      2. lovr_bin: in render_mcp.yaml (render-mcp reads it directly — we just skip)
+      2. lovr_bin: in scene/scene_service.yaml (scene reads it directly)
       3. Cached AppImage under deps/lovr/ inside the repo
       4. Auto-download from GitHub releases into the cache, then chmod +x
     """
     if os.environ.get("LOVR_BIN"):
         return
 
-    yaml_path = (_BASE / "../../agent-mcp-servers/render-mcp/render_mcp.yaml").resolve()
+    yaml_path = (_BASE / "scene/scene_service.yaml").resolve()
     if yaml_path.exists():
         for line in yaml_path.read_text().splitlines():
             if _LOVR_BIN_LINE.match(line):
-                return  # render-mcp will read lovr_bin directly from its YAML
+                return
 
     key = (sys.platform, platform.machine().lower())
     asset = _LOVR_ASSETS.get(key)
@@ -173,7 +175,7 @@ def _ensure_lovr_bin() -> None:
             f"\n"
             f"  Then set one of:\n"
             f"    export LOVR_BIN=/path/to/lovr\n"
-            f"    lovr_bin: /path/to/lovr   (in render_mcp.yaml)\n"
+            f"    lovr_bin: /path/to/lovr   (in scene/scene_service.yaml)\n"
         )
 
     cached = _LOVR_CACHE / asset
@@ -239,12 +241,16 @@ def _ensure_web_vendor() -> None:
 
 def run() -> None:
     setup_logging("orchestrator", namespace="xr-render-demo")
-    _ensure_web_vendor()
+    if is_native_profile(read_device_profile(_BASE / _CLOUDXR_CONFIG)):
+        os.environ[_NO_WEB_CLIENT_ENV] = "1"
+        logger.info("native device profile: web client page disabled, skipping vendor build")
+    else:
+        _ensure_web_vendor()
     _ensure_lovr_bin()
     backend = _model_backend()
     if backend == "nim":
         ensure_credentials("NGC_API_KEY")
-    run_stack(_build_processes(backend), _BASE)
+    run_stack(_build_processes(), _BASE)
 
 
 if __name__ == "__main__":

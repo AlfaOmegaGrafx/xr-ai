@@ -13,7 +13,7 @@ Each sample has **two sub-projects**:
 | Sub-project | Role | Dependencies |
 |---|---|---|
 | `<sample>/` | Orchestrator — declares process list in code, launches all | `xr-ai-launcher` only (stdlib) |
-| `<sample>/worker/` | Agent worker — connects to hub via IPC, runs agent logic | `xr-ai-agent`, numpy, etc. |
+| `<sample>/worker/` | Agent worker — connects to hub via IPC, runs agent logic | `xr-ai-hub-client`, numpy, etc. |
 
 **Configuration convention** — the YAML configuration path for each process is declared
 explicitly in the orchestrator's `PROCESSES` list via the `config=` field of
@@ -21,21 +21,26 @@ explicitly in the orchestrator's `PROCESSES` list via the `config=` field of
 All sample configuration files live in the `yaml/` directory. Omit `config=` for
 processes that use their own internal defaults.
 
+Samples that support interchangeable local and hosted models may set
+`models_config` in the worker YAML. `load_model_deployment()` reads the selected
+structured JSON profile using only the standard library and exposes its
+managed, reused, or external service ownership to the orchestrator. The same
+file is loaded by the worker through `xr-ai-models`; see the simple VLM
+sample's `yaml/models.local.json` and `yaml/models.hosted.json` profiles.
+
 The orchestrator declares the process sequence in code:
 
 ```python
 _BASE = Path(__file__).resolve().parent   # sample root
 
 PROCESSES = [
-    Process("hub",    "../../server-runtime", "xr_media_hub",
+    Process("hub",    "../../services/xr-media-hub", "xr_media_hub",
             config="yaml/xr_media_hub.yaml"),
     Process("worker", "worker",               "my_agent_worker",
             config="yaml/my_agent_worker.yaml"),
     # Optional shared components — add as needed:
-    # Process("cloudxr", "../../cloudxr-runtime",       "cloudxr_runtime",
+    # Process("cloudxr", "../../services/cloudxr-runtime", "cloudxr_runtime",
     #         config="yaml/cloudxr_runtime.yaml"),
-    # Process("mcp",     "../../agent-mcp-servers/oxr-mcp", "oxr_mcp_server",
-    #         config="yaml/oxr_mcp_server.yaml"),
 ]
 
 def run() -> None:
@@ -46,11 +51,14 @@ def run() -> None:
 
 - **Processes start serially** — each process must create its `--ready-file`
   before the next one starts. Declare processes in dependency order (hub
-  before workers, cloudxr before MCP servers that open OpenXR sessions, etc.).
+  before workers and application processes after the services they call).
 - **Every process accepts `--ready-file <path>`** and must `Path(path).touch()`
   when it is fully initialized and ready to serve requests.
+- **Native voice workers** pass the ready file to `VoiceAgent`; its private
+  media session touches it only after the input transport's hub IPC
+  receive loop has started.
 - `xr_media_hub` always runs as its own process — never embedded in-process.
-- The worker never imports anything from `server-runtime` or `utils/xr-ai-launcher/`.
+- The worker never imports anything from `xr_media_hub` or `xr_ai_launcher`.
 - Process management lives in `utils/xr-ai-launcher/`, not inside any process it manages.
 - `run_stack` is fail-fast: if any process exits, the rest are terminated.
 
@@ -67,10 +75,10 @@ The stack is declared as a sequence of `Process` or `Parallel` items:
 
 ```python
 PROCESSES = [
-    Process("hub",    "../../server-runtime", "xr_media_hub"),
+    Process("hub",    "../../services/xr-media-hub", "xr_media_hub"),
     Parallel([
-        Process("stt", "../../ai-services/stt-server", "stt_server"),
-        Process("tts", "../../ai-services/tts/piper",  "piper_tts_server"),
+        Process("stt", "../../services/stt-server", "stt_server"),
+        Process("tts", "../../services/piper-tts",  "piper_tts_server"),
     ]),
     Process("worker", "worker", "my_agent_worker"),
 ]
@@ -108,7 +116,7 @@ to serve requests. The launcher blocks on the file's existence; if the process
 exits before creating it, startup is aborted and the whole stack is torn down.
 This makes readiness explicit and process-defined: a model server signals ready
 after weights load, an HTTP server after it starts listening, a worker after
-its IPC socket connects.
+its IPC receive loop is active.
 
 ### `launch_mode`: own, persist, reuse
 

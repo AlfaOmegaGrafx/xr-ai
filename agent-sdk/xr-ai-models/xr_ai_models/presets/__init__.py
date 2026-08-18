@@ -3,7 +3,7 @@
 
 """Built-in presets for in-tree AI services.
 
-Each preset is a dict with the same keys a ``models.yaml`` entry would carry
+Each preset is a dict with the same keys a flattened model-profile entry carries
 (except ``base_url``, which is the caller's responsibility).  A YAML entry
 that says ``kind: preset:<name>`` merges its keys on top of the preset's;
 explicit keys win.
@@ -13,27 +13,39 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .cosmos3_nano_reasoner import COSMOS3_NANO_REASONER
 from .cosmos_vlm      import COSMOS_VLM
 from .llama_nemotron  import LLAMA_NEMOTRON
 from .magpie_tts      import MAGPIE_TTS
 from .nemotron3_nano  import NEMOTRON3_NANO
 from .nemotron_omni   import NEMOTRON_OMNI
+from .nemotron_embedding import NEMOTRON_EMBEDDING
 from .parakeet_stt    import PARAKEET_STT
 from .piper_tts       import PIPER_TTS
 
 
 _PRESETS: dict[str, dict[str, Any]] = {
+    "cosmos3_nano_reasoner": COSMOS3_NANO_REASONER,
     "cosmos_vlm":     COSMOS_VLM,
     "llama_nemotron": LLAMA_NEMOTRON,
     "magpie_tts":     MAGPIE_TTS,
     "nemotron3_nano": NEMOTRON3_NANO,
     "nemotron_omni":  NEMOTRON_OMNI,
+    "nemotron_embedding": NEMOTRON_EMBEDDING,
     "parakeet_stt":   PARAKEET_STT,
     "piper_tts":      PIPER_TTS,
 }
 
 
 def get_preset(name: str) -> dict[str, Any]:
+    """Return an independent copy of a built-in model preset.
+
+    Raises
+    ------
+    KeyError
+        If ``name`` does not identify a built-in preset.
+    """
+
     try:
         return deepcopy(_PRESETS[name])
     except KeyError as exc:
@@ -43,6 +55,8 @@ def get_preset(name: str) -> dict[str, Any]:
 
 
 def available_presets() -> list[str]:
+    """Return the sorted names of all built-in model presets."""
+
     return sorted(_PRESETS)
 
 

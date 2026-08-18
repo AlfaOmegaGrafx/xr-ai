@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xr-video-memory-service"
+version = "0.1.0"
+description = "Recorded-video memory service for XR AI."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "xr-ai-logging",
+    "xr-ai-tools[services]",
+    "numpy>=1.24",
+    "Pillow>=10.0",
+    "PyNvVideoCodec>=2.2",
+    "pyyaml>=6.0",
+]
+
+[tool.uv.sources]
+xr-ai-logging = { path = "../../utils/xr-ai-logging", editable = true }
+xr-ai-tools = { path = "../../agent-sdk/xr-ai-tools", editable = true }
+
+[project.scripts]
+video_memory_service = "video_memory_service.__main__:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["video_memory_service"]

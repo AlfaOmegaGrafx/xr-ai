@@ -16,11 +16,12 @@ import yaml
 class VoiceGateConfig:
     """Voice-gate behaviour knobs.
 
-    ``magic_phrases``    — strict-prefix opt-in words; empty tuple disables
-                           the gate so every STT transcript is dispatched.
+    ``magic_phrases``    — sentence-boundary opt-in phrases; a match is valid
+                           at transcript start or after ``.``, ``?``, or ``!``.
+                           An empty tuple dispatches every STT transcript.
     ``followup_grace_s`` — seconds after a phrase match during which the
-                           next utterance from the same participant
-                           bypasses the gate.
+                           next utterance from the same participant must
+                           begin to bypass the gate. It may finish later.
     ``listening_chime``  — when true AND ``magic_phrases`` is non-empty,
                            a short two-tone chime plays on the consumer's
                            audio sink whenever the worker invokes

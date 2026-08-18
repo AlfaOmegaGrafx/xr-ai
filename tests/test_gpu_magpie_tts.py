@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-GPU smoke test for ai-services/tts/magpie.
+GPU smoke test for services/magpie-tts.
 
 Spawns the Magpie NeMo TTS server as a subprocess (out of its own venv —
 the test harness must not pull NeMo / lightning) and round-trips a short
@@ -32,7 +32,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.gpu]
 
 
 _REPO_ROOT      = Path(__file__).resolve().parents[1]
-_MAGPIE_PROJECT = _REPO_ROOT / "ai-services" / "tts" / "magpie"
+_MAGPIE_PROJECT = _REPO_ROOT / "services" / "magpie-tts"
 _MAGPIE_BIN     = _MAGPIE_PROJECT / ".venv" / "bin" / "magpie_tts_server"
 _MAGPIE_YAML    = _MAGPIE_PROJECT / "magpie_tts_server.yaml"
 _DEFAULT_PORT   = 8104
@@ -66,8 +66,17 @@ async def _wait_for_port(port: int, *, proc: subprocess.Popen, timeout: float) -
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         if proc.poll() is not None:
+            out = b""
+            if proc.stdout:
+                out = proc.stdout.read()
+            server_log = (
+                f"\n--- server output (last 8 KB) ---\n{out[-8192:].decode(errors='replace')}"
+                if out
+                else "\n(no server output captured)"
+            )
             raise RuntimeError(
                 f"magpie_tts_server exited early with code {proc.returncode}"
+                + server_log
             )
         if _port_open(port):
             return
@@ -107,19 +116,23 @@ async def test_magpie_tts_smoke(tmp_path: Path) -> None:
     ref_cfg     = yaml.safe_load(_MAGPIE_YAML.read_text())
     model_name  = ref_cfg["model"]
     sample_rate = int(ref_cfg.get("sample_rate", 22050))
-    model_cache = (_MAGPIE_YAML.parent / ref_cfg.get("model_cache", "../models")).resolve()
+    model_cache = (_MAGPIE_YAML.parent / ref_cfg.get("model_cache", "../../models")).resolve()
 
     port = _pick_port(_DEFAULT_PORT)
 
-    cfg_path = tmp_path / "magpie_tts_server.yaml"
-    cfg_path.write_text(yaml.safe_dump({
+    test_cfg: dict = {
         "model":       model_name,
         "device":      "auto",
         "port":        port,
         "host":        "127.0.0.1",
         "sample_rate": sample_rate,
         "model_cache": str(model_cache),
-    }))
+    }
+    if ref_cfg.get("model_revision"):
+        test_cfg["model_revision"] = ref_cfg["model_revision"]
+
+    cfg_path = tmp_path / "magpie_tts_server.yaml"
+    cfg_path.write_text(yaml.safe_dump(test_cfg))
 
     env = {**os.environ, "XR_AI_LOG_ROOT": str(tmp_path / "logs")}
 

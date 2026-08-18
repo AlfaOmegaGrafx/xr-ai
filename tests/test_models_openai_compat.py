@@ -18,12 +18,27 @@ from _stub_openai import StubOpenAI
 from xr_ai_models import (
     Capabilities,
     ChatMessage,
+    OpenAICompatEmbedding,
     OpenAICompatLLM,
     OpenAICompatSTT,
     OpenAICompatTTS,
     OpenAICompatVLM,
     ToolDef,
 )
+
+
+async def test_embedding_batches_inputs_and_preserves_response_order() -> None:
+    stub = StubOpenAI()
+    stub.set_embeddings([[1.0, 0.0], [0.0, 1.0]])
+    async with OpenAICompatEmbedding(
+        "http://stub", "embed", client=stub.client(),
+    ) as embedding:
+        vectors = await embedding.embed(["query: alpha", "passage: beta"])
+    assert vectors == [[1.0, 0.0], [0.0, 1.0]]
+    assert stub.last_json() == {
+        "model": "embed",
+        "input": ["query: alpha", "passage: beta"],
+    }
 
 
 # ── LLM: chat ─────────────────────────────────────────────────────────────
@@ -247,6 +262,30 @@ async def test_llm_chat_no_auth_header_without_api_key_env() -> None:
     assert "Authorization" not in stub.last_request().headers
 
 
+async def test_llm_chat_forwards_controlled_per_call_headers() -> None:
+    stub = StubOpenAI()
+    async with OpenAICompatLLM(
+        "http://stub", "llm", client=stub.client(),
+    ) as llm:
+        await llm.chat(
+            [ChatMessage(role="user", content="x")],
+            headers={"X-Relay-Session": "turn-7"},
+        )
+    assert stub.last_request().headers["X-Relay-Session"] == "turn-7"
+
+
+async def test_llm_chat_rejects_per_call_authorization_header() -> None:
+    stub = StubOpenAI()
+    async with OpenAICompatLLM(
+        "http://stub", "llm", client=stub.client(),
+    ) as llm:
+        with pytest.raises(ValueError, match="cannot override Authorization"):
+            await llm.chat(
+                [ChatMessage(role="user", content="x")],
+                headers={"Authorization": "Bearer untrusted"},
+            )
+
+
 async def test_llm_chat_raises_on_http_error() -> None:
     import httpx
     stub = StubOpenAI()
@@ -327,7 +366,7 @@ def test_cleartext_key_transport_detection() -> None:
     # A bearer token over plain http:// to a non-loopback host is cleartext
     # credential transmission (CWE-319) — must be flagged. https, loopback,
     # or no key configured are all fine.
-    from xr_ai_models.openai_compat import _is_cleartext_key_transport as is_ct
+    from xr_ai_models._openai_compat import _is_cleartext_key_transport as is_ct
     assert is_ct("http://example.com", "k") is True
     assert is_ct("http://example.com:8000", "k") is True
     assert is_ct("https://example.com", "k") is False
@@ -386,6 +425,40 @@ async def test_vlm_ask_image_with_string_passes_through_url() -> None:
         "https://example.com/img.png"
 
 
+async def test_vlm_ask_images_preserves_order_and_uses_one_question() -> None:
+    stub = StubOpenAI()
+    stub.set_chat_message(content="the object moved")
+    async with OpenAICompatVLM(
+        "http://stub", "vlm", client=stub.client(),
+    ) as vlm:
+        response = await vlm.ask_images(
+            [_PNG_HEADER, "https://example.com/second.png"],
+            "What changed?",
+        )
+
+    assert response.content == "the object moved"
+    parts = stub.last_json()["messages"][0]["content"]
+    assert [part["type"] for part in parts] == [
+        "image_url",
+        "image_url",
+        "text",
+    ]
+    assert parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert parts[1]["image_url"]["url"] == "https://example.com/second.png"
+    assert parts[2] == {"type": "text", "text": "What changed?"}
+
+
+async def test_vlm_multi_image_paths_reject_empty_input() -> None:
+    stub = StubOpenAI()
+    async with OpenAICompatVLM(
+        "http://stub", "vlm", client=stub.client(),
+    ) as vlm:
+        with pytest.raises(ValueError, match="at least one image"):
+            await vlm.ask_images([], "What changed?")
+        with pytest.raises(ValueError, match="at least one image"):
+            _ = [chunk async for chunk in vlm.stream_images([], "What changed?")]
+
+
 async def test_vlm_ask_image_includes_system_prompt_when_set() -> None:
     stub = StubOpenAI()
     async with OpenAICompatVLM(
@@ -407,6 +480,38 @@ async def test_vlm_default_extras_propagate() -> None:
         await vlm.ask_image(_PNG_HEADER, "?")
     body = stub.last_json()
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+async def test_vlm_stream_forwards_controlled_per_call_headers() -> None:
+    stub = StubOpenAI()
+    stub.set_stream_tokens(["visible"])
+    async with OpenAICompatVLM(
+        "http://stub", "vlm", client=stub.client(),
+    ) as vlm:
+        chunks = [
+            chunk
+            async for chunk in vlm.stream(
+                _PNG_HEADER,
+                "?",
+                headers={"X-Relay-Session": "turn-7"},
+            )
+        ]
+
+    assert chunks == ["visible"]
+    assert stub.last_request().headers["X-Relay-Session"] == "turn-7"
+
+
+async def test_vlm_rejects_per_call_authorization_header() -> None:
+    stub = StubOpenAI()
+    async with OpenAICompatVLM(
+        "http://stub", "vlm", client=stub.client(),
+    ) as vlm:
+        with pytest.raises(ValueError, match="cannot override Authorization"):
+            await vlm.ask_image(
+                _PNG_HEADER,
+                "?",
+                headers={"Authorization": "Bearer untrusted"},
+            )
 
 
 # ── VLM: video ────────────────────────────────────────────────────────────

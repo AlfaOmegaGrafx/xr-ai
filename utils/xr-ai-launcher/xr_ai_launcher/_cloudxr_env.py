@@ -4,7 +4,7 @@
 """
 CloudXR environment helper — source ``cloudxr.env`` into ``os.environ``.
 
-With serial process startup (``run_stack`` launches cloudxr-runtime first and
+With serial process startup (``run_stack`` launches ``services/cloudxr-runtime`` first and
 waits for its ready file before starting any OpenXR consumer), callers no
 longer need to poll for the env file — it already exists by the time they
 start.  ``load_cloudxr_env`` is the only function needed.
@@ -20,10 +20,44 @@ log = logging.getLogger("xr_ai_launcher.cloudxr_env")
 
 _EXPORT_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
-# OpenXR runtime selector written by cloudxr-runtime into cloudxr.env.
+# OpenXR runtime selector written by services/cloudxr-runtime into cloudxr.env.
 XR_RUNTIME_VAR = "XR_RUNTIME_JSON"
 
-__all__ = ["XR_RUNTIME_VAR", "load_cloudxr_env"]
+# Profiles on CloudXR's direct native transport (skip the WSS proxy).
+NATIVE_DEVICE_PROFILES = frozenset({"auto-native", "apple-vision-pro", "ipad-pro"})
+
+_DEVICE_PROFILE_RE = re.compile(
+    r"^\s*NV_DEVICE_PROFILE\s*:\s*[\"']?([\w-]+)[\"']?", re.MULTILINE
+)
+
+__all__ = [
+    "XR_RUNTIME_VAR",
+    "load_cloudxr_env",
+    "NATIVE_DEVICE_PROFILES",
+    "is_native_profile",
+    "read_device_profile",
+]
+
+
+def is_native_profile(profile: str) -> bool:
+    """True if *profile* names a native-transport CloudXR device profile."""
+    return (profile or "").strip().lower() in NATIVE_DEVICE_PROFILES
+
+
+def read_device_profile(yaml_path) -> str:
+    """Return NV_DEVICE_PROFILE from the environment, or from *yaml_path* when unset."""
+    env_val = os.environ.get("NV_DEVICE_PROFILE")
+    if env_val:
+        return env_val
+    if not yaml_path:
+        return ""
+    try:
+        with open(yaml_path) as f:
+            text = f.read()
+    except OSError:
+        return ""
+    m = _DEVICE_PROFILE_RE.search(text)
+    return m.group(1) if m else ""
 
 
 def load_cloudxr_env(path: Path) -> None:

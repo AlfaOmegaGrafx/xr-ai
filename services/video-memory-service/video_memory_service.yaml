@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+endpoint: tcp://0.0.0.0:8310
+recordings_dir: /dev/shm/xr-ai/recordings
+out_dir: /tmp/xr_video_queries
+gpu_id: 0

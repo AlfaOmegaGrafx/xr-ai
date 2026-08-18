@@ -56,7 +56,7 @@ export LOVR_BIN=~/lovr/build/bin/lovr
 
 `export LOVR_BIN=…` only lasts for the current shell. To make it permanent,
 append the line to `~/.bashrc`, or set `lovr_bin: ~/lovr/build/bin/lovr` in
-`agent-mcp-servers/render-mcp/render_mcp.yaml` instead.
+`agent-samples/xr-render-demo/scene/scene_service.yaml` instead.
 
 If `git clone` was run without `--recursive`, run
 `git submodule update --init --recursive` inside `~/lovr` before `cmake ..`.
@@ -165,9 +165,9 @@ contains only wrapper messages — nothing from inside the container.
 **Health probe** — confirm vLLM never reached the `/health` endpoint:
 
 ```bash
-curl -fsS http://127.0.0.1:8107/health   # nemotron3_nano (agent-llm)
-curl -fsS http://127.0.0.1:8100/health   # vlm_server
-curl -fsS http://127.0.0.1:8106/health   # llama_nemotron (llm)
+curl -fsS http://127.0.0.1:8108/health   # nemotron_omni (default LLM)
+curl -fsS http://127.0.0.1:8100/health   # vlm_server (default Cosmos VLM)
+curl -fsS http://127.0.0.1:8107/health   # superseded nemotron3_nano
 ```
 
 **Container post-mortem** — the wrapper streams `docker logs -f` into the
@@ -208,8 +208,7 @@ local install.
 
 **Cause:** NVDEC (`libnvcuvid.so`) and NVENC (`libnvidia-encode.so`) are
 required — the XR-Media-Hub refuses to start without them so it never silently falls
-back to OpenH264 (which is royalty-bearing). Refer to the
-{doc}`changelog <../reference/changelog>` entry **2026-04-21 — NVDEC/NVENC required**.
+back to OpenH264, which is royalty-bearing.
 
 **Fix:**
 - **Bare metal:** install or repair the NVIDIA driver. The libraries ship with the
@@ -224,19 +223,19 @@ back to OpenH264 (which is royalty-bearing). Refer to the
 **Cause:** an idle-timeout that auto-cancels the voice pipeline after a stretch
 with no user or bot speech.
 
-**Status:** disabled by default. `make_voice_pipeline` passes
-`cancel_on_idle_timeout=False` (overriding pipecat's on-by-default
-`IDLE_TIMEOUT_SECS`), so a quiet session stays connected indefinitely.
+**Status:** disabled by default. `VoiceAgent` leaves its private Pipecat idle
+timeout disabled, so a quiet session stays connected indefinitely.
 
 **If you want it:** set `idle_timeout_secs: <seconds>` (e.g. `300` for 5 min)
 in the sample's worker YAML (`simple_vlm_example_worker.yaml` /
-`xr_render_demo_worker.yaml`); `0` or unset keeps it disabled.
+`xr_render_demo_worker.yaml`); `0` or unset keeps it disabled. The knob is
+owned by `xr_ai_voice.VoiceAgent`.
 
 ### Browser client connects but no audio or no video
 
 **Most common cause:** firewall blocking WebRTC media on UDP 7882 (LiveKit).
 
-**Fix:** open ports per [`docs/networking.md`](https://github.com/NVIDIA/xr-ai/blob/main/docs/networking.md). The web client
+**Fix:** open ports per {doc}`/getting_started/networking`. The web client
 will appear to connect (signaling on 7880 succeeds) but media frames are
 silently dropped without 7882.
 
@@ -333,23 +332,25 @@ the IWER emulator built into the web client itself for desktop dev.
 
 ### vLLM cold start takes 3–8 minutes
 
-**Symptom:** `vlm_server` or `nemotron3_nano_llm_server` weight load is fast,
+**Symptom:** a vLLM server's weight load is fast,
 but the server then sits silent for several minutes before becoming healthy.
 
 **Cause:** CUDA graph capture + FlashInfer FP4 MoE autotune happen on first
 run after weight load. They are silent.
 
-**Fix:** the shipped YAMLs default to `enforce_eager: true` which avoids both.
-Eager mode is 10–20% slower per token but starts in ~5 s after weight load —
-imperceptible at <250 tokens/turn where STT+VAD+TTS dominate latency. Don't
-flip `enforce_eager: false` unless you have a measured reason.
+**Fix:** the default Omni profiles set `enforce_eager: false` to enable CUDA
+graph capture and maximize steady-state throughput, so this startup delay is
+expected. For development, set `enforce_eager: true` in the active model YAML
+to skip CUDA graph capture. Eager mode starts faster but can reduce per-token
+throughput; keep the default when steady-state performance matters more than
+cold-start time.
 
 ### `xr_render_demo` exits but VRAM is still pinned
 
-**By design.** The vLLM-backed servers (`vlm_server`,
-`llama_nemotron_llm_server`, `nemotron3_nano_llm_server`) survive stack
+**By design.** The vLLM-backed servers (`nemotron_omni_llm_server`,
+`vlm_server`, and `nemotron3_nano_llm_server`) survive stack
 restarts so model weights stay loaded across worker crashes and debug
-restarts. See [`docs/ai-services.md`](https://github.com/NVIDIA/xr-ai/blob/main/docs/ai-services.md) → *vLLM model
+restarts. See {doc}`/components/ai-services` → *vLLM model
 persistence*.
 
 **Fix:** to fully release VRAM:
@@ -370,8 +371,10 @@ to run while the stack is down.
 time.
 
 **Cause:** model weights are downloading from HuggingFace into `models/` at
-the repository root (gitignored, ~16 GB for Cosmos-Reason1-7B alone).
+the repository root (gitignored; the Cosmos3 checkpoint alone is tens of GB).
 
 **Fix:** wait. Subsequent runs use the cached weights and start in
-~30–60 s. If a download fails, check that `HF_TOKEN` is set if the model
-needs it (see [`docs/credentials.md`](https://github.com/NVIDIA/xr-ai/blob/main/docs/credentials.md)).
+~30–60 s. If the download makes no progress, note that unauthenticated
+downloads (runs started with `--allow-anonymous`) are rate-limited and can
+stall indefinitely; set `HF_TOKEN` and restart
+(see {doc}`/getting_started/credentials`).
