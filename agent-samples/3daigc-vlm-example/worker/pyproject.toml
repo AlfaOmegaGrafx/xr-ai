@@ -10,41 +10,30 @@ name = "3daigc-vlm-example-worker"
 version = "0.1.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
-    "xr-ai-agent",
+    "nemo-relay>=0.7.2,<0.8",
+    "xr-ai-agent-runtime",
+    "xr-ai-hub-client",
     "xr-ai-logging",
     "xr-ai-models",
-    "xr-ai-pipecat",
+    "xr-ai-tools[frames,vision]",
+    "xr-ai-voice",
     "xr-ai-voicegate",
-    "numpy>=1.24",
-    "Pillow>=10.0",
-    "pyyaml>=6.0",
     "fastmcp>=0.4",
-    "pipecat-ai>=1.3.0",
-]
-
-# Spark/aarch64 + Python 3.12: pipecat → resampy pins ancient numba/llvmlite (<3.10).
-[tool.uv]
-override-dependencies = [
-    "numba>=0.60",
-    "llvmlite>=0.43",
+    "loguru>=0.7",
+    "pyyaml>=6.0",
 ]
 
 [tool.uv.sources]
-xr-ai-agent     = { path = "../../../agent-sdk", editable = true }
+xr-ai-agent-runtime = { path = "../../../agent-sdk/xr-ai-runtime", editable = true }
+xr-ai-hub-client = { path = "../../../agent-sdk/xr-ai-hub", editable = true }
 xr-ai-logging   = { path = "../../../utils/xr-ai-logging", editable = true }
 xr-ai-models    = { path = "../../../agent-sdk/xr-ai-models", editable = true }
-xr-ai-pipecat   = { path = "../../../agent-sdk/xr-ai-pipecat", editable = true }
+xr-ai-tools     = { path = "../../../agent-sdk/xr-ai-tools", editable = true }
+xr-ai-voice     = { path = "../../../agent-sdk/xr-ai-voice", editable = true }
 xr-ai-voicegate = { path = "../../../utils/xr-ai-voicegate", editable = true }
 
 [project.scripts]
-daigc_vlm_example_worker = "daigc_vlm_example_worker:run"
+daigc_vlm_example_worker = "daigc_vlm_example_worker.__main__:run"
 
 [tool.hatch.build.targets.wheel]
-only-include = [
-    "daigc_vlm_example_worker.py",
-    "agent.py",
-    "config.py",
-    "daigc_tools.py",
-    "pixels.py",
-    "vlm_brain_base.py",
-]
+packages = ["daigc_vlm_example_worker"]

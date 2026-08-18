@@ -67,6 +67,7 @@ _ALLOWED_LEGACY_REFERENCES = {
 }
 _HUB_PROJECT = _ROOT / "services" / "xr-media-hub"
 _SAMPLE_WEB_CLIENTS = {
+    "3daigc-vlm-example": _ROOT / "client-samples" / "web",
     "simple-vlm-example": _ROOT / "client-samples" / "web",
     "xr-render-demo": _ROOT / "client-samples" / "web-xr",
 }
@@ -240,6 +241,10 @@ def test_sample_process_projects_resolve(monkeypatch) -> None:
         "service_layout_simple_vlm",
         "agent-samples/simple-vlm-example/main.py",
     )
+    daigc_vlm = _load_module(
+        "service_layout_daigc_vlm",
+        "agent-samples/3daigc-vlm-example/main.py",
+    )
     render_demo = _load_module(
         "service_layout_render_demo",
         "agent-samples/xr-render-demo/main.py",
@@ -254,6 +259,10 @@ def test_sample_process_projects_resolve(monkeypatch) -> None:
         (
             _ROOT / "agent-samples/simple-vlm-example",
             simple_vlm._MODEL_PROCESSES.values(),
+        ),
+        (
+            _ROOT / "agent-samples/3daigc-vlm-example",
+            daigc_vlm._MODEL_PROCESSES.values(),
         ),
         (
             _ROOT / "agent-samples/xr-render-demo",
@@ -287,7 +296,7 @@ def test_sample_hub_projects_resolve() -> None:
             assert isinstance(project, ast.Constant) and isinstance(project.value, str)
             sample_projects[main_path.parent.name] = project.value
 
-    assert {"simple-vlm-example", "xr-render-demo"} <= sample_projects.keys()
+    assert {"3daigc-vlm-example", "simple-vlm-example", "xr-render-demo"} <= sample_projects.keys()
     for sample, project in sample_projects.items():
         sample_root = _ROOT / "agent-samples" / sample
         assert (sample_root / project).resolve() == _HUB_PROJECT

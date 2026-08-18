@@ -19,6 +19,7 @@ _MODEL_PROFILES = _SAMPLES / "model-servers" / "yaml"
 _LOCAL_VLM_CONFIGS = (
     _SERVER_YAML,
     _SAMPLES / "simple-vlm-example" / "yaml" / "vlm_server.yaml",
+    _SAMPLES / "3daigc-vlm-example" / "yaml" / "vlm_server.yaml",
     _MODEL_PROFILES / "96G_blackwell" / "vlm_server.yaml",
     _MODEL_PROFILES / "dual_48G_ada" / "vlm_server.yaml",
     _MODEL_PROFILES / "spark" / "vlm_server.yaml",
@@ -123,6 +124,16 @@ def test_sample_model_profiles_select_cosmos3_reasoner() -> None:
         "cosmos3_nano_reasoner"
     )
     assert simple_hosted["models"]["vlm"]["adapter"]["model_name"] == (
+        "nvidia/cosmos3-nano-reasoner"
+    )
+
+    daigc = _SAMPLES / "3daigc-vlm-example" / "yaml"
+    daigc_local = json.loads((daigc / "models.local.json").read_text())
+    daigc_hosted = json.loads((daigc / "models.hosted.json").read_text())
+    assert daigc_local["models"]["vlm"]["adapter"]["preset"] == (
+        "cosmos3_nano_reasoner"
+    )
+    assert daigc_hosted["models"]["vlm"]["adapter"]["model_name"] == (
         "nvidia/cosmos3-nano-reasoner"
     )
 

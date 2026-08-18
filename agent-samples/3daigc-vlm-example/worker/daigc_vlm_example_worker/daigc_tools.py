@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import Any
 
 from fastmcp import Client as McpClient
+from xr_ai_tools.image import ImageReference, ImageRegistry
 
 _MESH_INTENT = re.compile(
     r"(?:"
@@ -22,13 +24,33 @@ _MESH_INTENT = re.compile(
 )
 
 
+def mcp_endpoint(url: str) -> str:
+    """Normalize a 3DAIGC MCP base URL to the FastMCP HTTP path."""
+
+    base = url.rstrip("/")
+    return base if base.endswith("/mcp") else f"{base}/mcp"
+
+
 def wants_mesh_generation(query: str) -> bool:
     """Return True when the user is asking to generate a 3D mesh from the camera."""
+
     return bool(_MESH_INTENT.search(query.strip()))
+
+
+def image_to_data_url(images: ImageRegistry, reference: ImageReference) -> str:
+    """Encode a registered camera frame as a JPEG data URL for MCP upload."""
+
+    image = images.resolve(reference)
+    if isinstance(image, bytes):
+        return f"data:image/jpeg;base64,{base64.b64encode(image).decode()}"
+    if isinstance(image, str) and image.startswith("data:"):
+        return image
+    raise TypeError(f"unsupported image input for MCP upload: {type(image)!r}")
 
 
 def parse_tool_result(result: Any) -> dict[str, Any]:
     """Unwrap a FastMCP tool result into a dict."""
+
     data = getattr(result, "data", None)
     if isinstance(data, dict):
         return data
@@ -67,6 +89,19 @@ def _base64_from_data_url(image_data_url: str) -> str:
     return image_data_url
 
 
+async def mcp_health(url: str) -> bool:
+    """Return True when the 3DAIGC MCP server exposes mesh-generation tools."""
+
+    try:
+        async with McpClient(mcp_endpoint(url)) as client:
+            tools = await client.list_tools()
+        listed = getattr(tools, "tools", tools)
+        names = {getattr(tool, "name", "") for tool in listed}
+        return bool(names & {"health_check", "upload_image", "image_to_textured_mesh"})
+    except Exception:
+        return False
+
+
 async def run_image_to_mesh(
     client: McpClient,
     *,
@@ -75,6 +110,7 @@ async def run_image_to_mesh(
     timeout_sec: float = 600.0,
 ) -> dict[str, Any]:
     """Upload camera frame → image_to_textured_mesh → wait_for_job."""
+
     b64 = _base64_from_data_url(image_data_url)
 
     upload = await call_tool_json(
@@ -104,6 +140,7 @@ async def run_image_to_mesh(
 
 def spoken_mesh_summary(result: dict[str, Any]) -> str:
     """Short TTS-friendly summary after mesh generation completes."""
+
     job = result.get("job") or {}
     status = str(job.get("status") or result.get("status") or "unknown")
     if status != "completed":

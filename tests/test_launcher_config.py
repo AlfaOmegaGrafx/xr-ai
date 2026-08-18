@@ -213,3 +213,15 @@ def test_bundled_worker_selects_local_profile() -> None:
     )
 
     assert deployment.profile_path == _SIMPLE_VLM_YAML / "models.local.json"
+
+
+def test_bundled_daigc_worker_selects_hosted_profile() -> None:
+    deployment = load_model_deployment(
+        _ROOT / "agent-samples" / "3daigc-vlm-example" / "yaml" / "3daigc_vlm_example_worker.yaml"
+    )
+
+    assert deployment.profile_path == (
+        _ROOT / "agent-samples" / "3daigc-vlm-example" / "yaml" / "models.hosted.json"
+    )
+    assert deployment.services == {"stt": "own", "tts": "own"}
+    assert deployment.required_credentials == ("NGC_API_KEY",)

@@ -248,6 +248,7 @@ xr-ai-tests  (tests/)
     └── Pillow >=10.0   (CPU native-vision and GPU image tests)
     └── python-multipart >=0.0.9   (STT endpoint tests import stt-server via pythonpath)
     └── pyyaml >=6.0    (CPU subprocess/service configs and GPU service tests)
+    └── fastmcp >=0.4   (3daigc-vlm-example worker imports FastMCP in unit tests)
     The unmarked suite is multi-client / multi-agent integration tests over
     the IPC layer, driven via ZMQ `ipc://` only — no Docker / LiveKit /
     NVENC required. Also covers unit tests for the leaf util packages
@@ -464,6 +465,25 @@ in-process. The `models_config` key selects a structured deployment profile:
 adapter behavior, endpoint readiness and
 credentials, and launcher ownership. Voice-gate knobs are configured via
 `yaml/voice_gate.yaml`.
+
+### 3daigc-vlm-example  (agent-samples/3daigc-vlm-example/)
+
+Voice VLM plus optional 3DAIGC image-to-mesh. Scene questions follow the same
+`CurrentFrameTool` → `StreamingImageQueryTool` path as simple-vlm-example.
+Mesh intent (`make a 3D model of this`) uploads the current camera frame to
+3DAIGC MCP (`upload_image` → `image_to_textured_mesh` → `wait_for_job`) and
+publishes the job payload on `3daigc.meshResult`.
+
+| Sub-project | Package | Internal deps | External deps |
+|---|---|---|---|
+| Orchestrator | `3daigc-vlm-example` | `xr-ai-launcher` | — |
+| Worker | `3daigc-vlm-example-worker` | `xr-ai-agent-runtime [editable]`, `xr-ai-hub-client [editable]`, `xr-ai-logging [editable]`, `xr-ai-models [editable]`, `xr-ai-tools[frames,vision] [editable]`, `xr-ai-voice [editable]`, `xr-ai-voicegate [editable]` | nemo-relay >=0.7.2,<0.8, fastmcp >=0.4, loguru >=0.7, pyyaml >=6.0 |
+
+The default `models_config` is `models.hosted.json` (NVIDIA NIM VLM). Local
+Cosmos3 and Nemotron-Omni profiles are the same files as simple-vlm-example.
+The orchestrator reuses an already-running `3daigc-mcp-http` on port 8260
+(`DAIGC_MCP_ROOT`, default `/home/sifr/3DAIGC-API/mcp`). Hub web client listens
+on port 8088.
 
 ### model-servers  (agent-samples/model-servers/)
 

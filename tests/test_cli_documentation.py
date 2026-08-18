@@ -19,12 +19,20 @@ load_cli_catalog = _CLI_REFERENCE["load_cli_catalog"]
 def test_sample_command_catalog_matches_top_level_projects() -> None:
     commands = {command.program: command for command in load_cli_catalog(_ROOT)}
 
-    assert set(commands) == {"model_servers", "simple_vlm_example", "xr_render_demo"}
+    assert set(commands) == {
+        "daigc_vlm_example",
+        "model_servers",
+        "simple_vlm_example",
+        "xr_render_demo",
+    }
     assert [argument.flags for argument in commands["model_servers"].arguments] == [
         ("--stop",),
         ("--allow-anonymous",),
     ]
     assert [argument.flags for argument in commands["simple_vlm_example"].arguments] == [
+        ("--allow-anonymous",),
+    ]
+    assert [argument.flags for argument in commands["daigc_vlm_example"].arguments] == [
         ("--allow-anonymous",),
     ]
     assert commands["xr_render_demo"].arguments == ()
