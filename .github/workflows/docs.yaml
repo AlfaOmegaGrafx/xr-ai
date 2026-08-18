@@ -35,6 +35,8 @@ on:
       - "docs/**"
       - "agent-sdk/*/README.md"
       - "agent-sdk/**/*.py"
+      - "agent-samples/*/main.py"
+      - "agent-samples/*/pyproject.toml"
       - ".github/workflows/docs.yaml"
       - ".github/scripts/select_latest_docs_release.py"
       - ".github/scripts/publish_docs.sh"
@@ -46,6 +48,8 @@ on:
       - "docs/**"
       - "agent-sdk/*/README.md"
       - "agent-sdk/**/*.py"
+      - "agent-samples/*/main.py"
+      - "agent-samples/*/pyproject.toml"
       - ".github/workflows/docs.yaml"
       - ".github/scripts/select_latest_docs_release.py"
       - ".github/scripts/publish_docs.sh"
@@ -87,13 +91,15 @@ jobs:
         run: make -C docs strict
       - name: Strict versioned documentation build
         run: make -C docs strict-versions
-      - name: Point the site root at the latest release
+      - name: Point the site root at the review or release entry point
         shell: bash
         run: |
           latest_release="$(make -s -C docs latest-release)"
 
           latest_target="../main/"
-          if [[ -n "$latest_release" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            latest_target="../current/"
+          elif [[ -n "$latest_release" ]]; then
             latest_target="../${latest_release}/"
           fi
 
