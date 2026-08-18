@@ -11,8 +11,44 @@ from pathlib import Path
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 API_PACKAGE_DIRS = (
+    _REPOSITORY_ROOT / "agent-sdk" / "xr-ai-hub" / "xr_ai_hub",
+    _REPOSITORY_ROOT / "agent-sdk" / "xr-ai-models" / "xr_ai_models",
     _REPOSITORY_ROOT / "agent-sdk" / "xr-ai-runtime" / "xr_ai_runtime",
+    _REPOSITORY_ROOT / "agent-sdk" / "xr-ai-tools" / "xr_ai_tools",
     _REPOSITORY_ROOT / "agent-sdk" / "xr-ai-voice" / "xr_ai_voice",
+)
+PUBLIC_API_MODULES = (
+    "xr_ai_models.presets",
+    "xr_ai_tools.async_tools",
+    "xr_ai_tools.current_frame",
+    "xr_ai_tools.image",
+    "xr_ai_tools.image_polygon",
+    "xr_ai_tools.marker_tracking",
+    "xr_ai_tools.rag",
+    "xr_ai_tools.rpc",
+    "xr_ai_tools.spatial",
+    "xr_ai_tools.text_memory",
+    "xr_ai_tools.tool_calling",
+    "xr_ai_tools.tools",
+    "xr_ai_tools.tracking",
+    "xr_ai_tools.types",
+    "xr_ai_tools.video_memory",
+    "xr_ai_tools.vision",
+)
+PUBLIC_API_EXCLUSIONS = (
+    "xr_ai_models.presets.cosmos3_nano_reasoner",
+    "xr_ai_models.presets.cosmos_vlm",
+    "xr_ai_models.presets.llama_nemotron",
+    "xr_ai_models.presets.magpie_tts",
+    "xr_ai_models.presets.nemotron3_nano",
+    "xr_ai_models.presets.nemotron_embedding",
+    "xr_ai_models.presets.nemotron_omni",
+    "xr_ai_models.presets.parakeet_stt",
+    "xr_ai_models.presets.piper_tts",
+    "xr_ai_runtime.agent",
+    "xr_ai_runtime.events",
+    "xr_ai_runtime.runtime",
+    "xr_ai_tools.utilities.generate_marker",
 )
 
 
@@ -109,10 +145,6 @@ def _imported_module_parts(
     return (*package[: len(package) - parent_count], *imported)
 
 
-def _assignment_value(node: ast.Assign | ast.AnnAssign) -> ast.expr | None:
-    return node.value
-
-
 def _resolve_name(
     package_dir: Path,
     module: _Module,
@@ -148,15 +180,9 @@ def _resolve_name(
         imported_module = _load_module(package_dir, binding[0], modules)
         if imported_module is None:
             return None
-        return _resolve_name(
-            package_dir,
-            imported_module,
-            binding[1],
-            modules,
-            resolving,
-        )
+        return _resolve_name(package_dir, imported_module, binding[1], modules, resolving)
     if isinstance(binding, (ast.Assign, ast.AnnAssign)):
-        value = _assignment_value(binding)
+        value = binding.value
         if isinstance(value, ast.Name) and value.id != name:
             target = _resolve_name(package_dir, module, value.id, modules, resolving)
             if target is not None:
@@ -218,34 +244,85 @@ def _public_fields_without_docstrings(node: ast.ClassDef) -> list[str]:
     ]
 
 
+def _validate_module(
+    package_dir: Path,
+    parts: tuple[str, ...],
+    label: str,
+) -> list[str]:
+    modules: dict[tuple[str, ...], _Module] = {}
+    module = _load_module(package_dir, parts, modules)
+    if module is None:
+        return [f"{label}: public module does not resolve"]
+
+    failures: list[str] = []
+    for name in _literal_exports(module.tree, module.path):
+        definition = _resolve_name(package_dir, module, name, modules)
+        if definition is None:
+            failures.append(f"{label}: exported {name} does not resolve")
+            continue
+        if not _definition_has_docstring(definition):
+            failures.append(f"{label}: exported {name} has no docstring")
+        if not isinstance(definition.node, ast.ClassDef):
+            continue
+        failures.extend(
+            f"{label}: public method {name}.{method} has no docstring"
+            for method in _public_methods_without_docstrings(definition.node)
+        )
+        failures.extend(
+            f"{label}: public field {name}.{field} has no docstring"
+            for field in _public_fields_without_docstrings(definition.node)
+        )
+    return failures
+
+
+def _importable_module_name(package_dir: Path, path: Path) -> str | None:
+    relative = path.relative_to(package_dir)
+    parts = relative.parts[:-1]
+    if path.name != "__init__.py":
+        parts = (*parts, path.stem)
+    if any(part.startswith("_") for part in parts):
+        return None
+    return ".".join((package_dir.name, *parts))
+
+
+def _importable_modules(package_dir: Path) -> set[str]:
+    return {
+        module_name
+        for path in package_dir.rglob("*.py")
+        if (module_name := _importable_module_name(package_dir, path)) is not None
+    }
+
+
 def validate_public_api() -> list[str]:
     """Return documentation contract violations for the enrolled packages."""
 
     failures: list[str] = []
+    package_dirs = {path.name: path for path in API_PACKAGE_DIRS}
+    discovered_modules = set().union(
+        *(_importable_modules(package_dir) for package_dir in API_PACKAGE_DIRS)
+    )
+    classified_modules = {
+        *package_dirs,
+        *PUBLIC_API_MODULES,
+        *PUBLIC_API_EXCLUSIONS,
+    }
+    failures.extend(
+        f"{module_name}: importable module is neither enrolled nor excluded"
+        for module_name in sorted(discovered_modules - classified_modules)
+    )
+    failures.extend(
+        f"{module_name}: excluded module does not resolve"
+        for module_name in sorted(set(PUBLIC_API_EXCLUSIONS) - discovered_modules)
+    )
+
     for package_dir in API_PACKAGE_DIRS:
-        modules: dict[tuple[str, ...], _Module] = {}
-        facade = _load_module(package_dir, (), modules)
-        if facade is None:
-            failures.append(f"{package_dir.name}: package facade does not resolve")
-            continue
-        exports = _literal_exports(facade.tree, facade.path)
-        for name in exports:
-            definition = _resolve_name(package_dir, facade, name, modules)
-            if definition is None:
-                failures.append(f"{package_dir.name}: exported {name} does not resolve")
-                continue
-            if not _definition_has_docstring(definition):
-                failures.append(f"{package_dir.name}: exported {name} has no docstring")
-            if not isinstance(definition.node, ast.ClassDef):
-                continue
-            failures.extend(
-                f"{package_dir.name}: public method {name}.{method} has no docstring"
-                for method in _public_methods_without_docstrings(definition.node)
-            )
-            failures.extend(
-                f"{package_dir.name}: public field {name}.{field} has no docstring"
-                for field in _public_fields_without_docstrings(definition.node)
-            )
+        failures.extend(_validate_module(package_dir, (), package_dir.name))
+
+    for module_name in PUBLIC_API_MODULES:
+        package_name, *parts = module_name.split(".")
+        failures.extend(
+            _validate_module(package_dirs[package_name], tuple(parts), module_name)
+        )
     return failures
 
 
