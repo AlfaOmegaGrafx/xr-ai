@@ -46,18 +46,18 @@ def _build_processes(backend: str) -> list[Process]:
             launch_mode="reuse",
             port=8260,
         ),
-        Process("hub", "../../server-runtime", "xr_media_hub",
+        Process("hub", "../../services/xr-media-hub", "xr_media_hub",
                 config="yaml/xr_media_hub.yaml"),
     ]
     if backend != "nim":
         procs.append(
-            Process("vlm", "../../ai-services/vlm-server", "vlm_server",
+            Process("vlm", "../../services/vlm-server", "vlm_server",
                     config="yaml/vlm_server.yaml"),
         )
     procs += [
-        Process("stt", "../../ai-services/stt-server", "stt_server",
+        Process("stt", "../../services/stt-server", "stt_server",
                 config="yaml/stt_server.yaml"),
-        Process("tts", "../../ai-services/tts/piper", "piper_tts_server",
+        Process("tts", "../../services/piper-tts", "piper_tts_server",
                 config="yaml/piper_tts_server.yaml"),
         Process("worker", "worker", "daigc_vlm_example_worker",
                 config=_WORKER_CONFIG),
